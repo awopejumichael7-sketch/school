@@ -1,0 +1,348 @@
+rules_version = '2';
+
+// =============================================================================
+// School SaaS - Firestore Security Rules (Spark-only: no Cloud Functions)
+//
+// Trust model
+//  * Nothing the client sends is trusted for identity: tenant membership and
+//    role come from /tenants/{t}/members/{uid}, which clients cannot forge
+//    (only created in the license-activation batch; admin-created members
+//    arrive in Phase 8/9 behind SCHOOL_ADMIN checks).
+//  * The tenant is taken from the document PATH, never from a field.
+//  * Platform owner = existence of /platformAdmins/{uid} (created by hand in
+//    the Firebase console; no client can write it).
+//  * Rules allow at most 10 document-access calls per operation and 20 per
+//    batch, so helpers are written to use as few get()/exists() as possible.
+// =============================================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- path helpers ----------
+    function tenantPath(t)  { return /databases/$(database)/documents/tenants/$(t); }
+    function memberPath(t, u) { return /databases/$(database)/documents/tenants/$(t)/members/$(u); }
+    function licensePath(h) { return /databases/$(database)/documents/licenses/$(h); }
+
+    // ---------- identity helpers ----------
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+
+    function isPlatformAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/platformAdmins/$(request.auth.uid));
+    }
+
+    // Active member of tenant t (2 access calls: member + tenant). Used for every
+    // tenant-scoped data check so a suspended/expired license blocks all access.
+    function hasRole(t, roles) {
+      let m = get(memberPath(t, request.auth.uid)).data;
+      let tn = get(tenantPath(t)).data;
+      return signedIn()
+        && m.status == 'ACTIVE'
+        && m.role in roles
+        && tn.status == 'ACTIVE'
+        && (tn.get('expiresAt', null) == null || tn.expiresAt > request.time);
+    }
+    function isMember(t) {
+      return hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'TEACHER', 'STUDENT', 'PARENT', 'ACCOUNTANT', 'STAFF']);
+    }
+    // Member of t regardless of license state (used only to let users see "suspended").
+    function isMemberAnyState(t) {
+      return signedIn() && get(memberPath(t, request.auth.uid)).data.status == 'ACTIVE';
+    }
+    function isTenantAdminAnyState(t) {
+      let m = get(memberPath(t, request.auth.uid)).data;
+      return signedIn() && m.status == 'ACTIVE' && m.role == 'SCHOOL_ADMIN';
+    }
+
+    // =========================================================================
+    // Platform owner
+    // =========================================================================
+    match /platformAdmins/{id} {
+      allow get: if signedIn() && request.auth.uid == id;   // lets the app detect owner mode
+      allow list, write: if false;
+    }
+
+    // =========================================================================
+    // Licenses: document ID = SHA-256 of the key. Possession of the key (80 bits)
+    // is required to even address the document, so `get` is open and `list` is not.
+    // =========================================================================
+    match /licenses/{hash} {
+      allow get: if hash.matches('^[0-9a-f]{64}$');
+      allow list: if isPlatformAdmin();
+      allow create: if isPlatformAdmin() && validNewLicense(hash);
+      allow update: if isPlatformAdmin() && ownerLicenseEdit()
+                    || isFirstActivation(hash)
+                    || isReactivation();
+      allow delete: if false;
+    }
+
+    function validNewLicense(hash) {
+      let d = request.resource.data;
+      return hash.matches('^[0-9a-f]{64}$')
+        && d.keys().hasOnly(['product', 'plan', 'billingCycle', 'status', 'tenantId', 'installationId',
+             'activationCount', 'maxActivations', 'createdAt', 'createdBy', 'activatedAt', 'activatedBy',
+             'lastValidated', 'expiresAt', 'note'])
+        && d.keys().hasAll(['product', 'plan', 'billingCycle', 'status', 'tenantId', 'installationId',
+             'activationCount', 'maxActivations', 'createdAt', 'createdBy', 'activatedAt', 'activatedBy',
+             'lastValidated', 'expiresAt', 'note'])
+        && d.status == 'UNUSED'
+        && d.tenantId == null
+        && d.installationId == null
+        && d.activationCount == 0
+        && d.maxActivations is int && d.maxActivations >= 1 && d.maxActivations <= 5
+        && d.createdAt == request.time
+        && d.createdBy == request.auth.uid
+        && d.plan is string && d.plan.size() <= 40
+        && d.billingCycle in ['LIFETIME', 'MONTHLY', 'QUARTERLY', 'ANNUAL']
+        && (d.expiresAt == null || d.expiresAt is timestamp)
+        && d.note is string && d.note.size() <= 300;
+    }
+
+    // Product owner may change anything EXCEPT the tenant binding once it exists,
+    // so a key can never be re-pointed to a different school.
+    function ownerLicenseEdit() {
+      return request.resource.data.status in ['UNUSED', 'ACTIVE', 'DEACTIVATED', 'RESET']
+        && (resource.data.tenantId == null || request.resource.data.tenantId == resource.data.tenantId)
+        && request.resource.data.keys().hasOnly(['product', 'plan', 'billingCycle', 'status', 'tenantId',
+             'installationId', 'activationCount', 'maxActivations', 'createdAt', 'createdBy', 'activatedAt',
+             'activatedBy', 'lastValidated', 'expiresAt', 'note'])
+        && request.resource.data.createdBy == resource.data.createdBy;
+    }
+
+    // First activation: UNUSED -> ACTIVE, bound to the tenant created in the SAME batch.
+    // Access calls: 2 (exists tenant before, getAfter tenant).
+    function isFirstActivation(hash) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return signedIn()
+        && before.status == 'UNUSED'
+        && before.tenantId == null
+        && before.activationCount < before.maxActivations
+        && (before.get('expiresAt', null) == null || before.expiresAt > request.time)
+        && after.diff(before).affectedKeys().hasOnly(
+             ['status', 'tenantId', 'activatedAt', 'activatedBy', 'installationId', 'activationCount', 'lastValidated'])
+        && after.status == 'ACTIVE'
+        && after.activationCount == before.activationCount + 1
+        && after.activatedBy == request.auth.uid
+        && after.activatedAt == request.time
+        && after.lastValidated == request.time
+        && after.tenantId is string
+        && after.installationId is string && after.installationId.size() >= 8
+        && !exists(tenantPath(after.tenantId))
+        && getAfter(tenantPath(after.tenantId)).data.licenseId == hash
+        && getAfter(tenantPath(after.tenantId)).data.ownerUid == request.auth.uid;
+        // (the tenant's own create rule independently verifies the license state)
+    }
+
+    // Re-binding after the product owner reset the installation. The tenant can
+    // NOT change (tenantId is not in affectedKeys), and the caller must be an
+    // admin of that same tenant.
+    function isReactivation() {
+      let before = resource.data;
+      let after = request.resource.data;
+      return signedIn()
+        && before.status == 'RESET'
+        && before.tenantId is string
+        && before.activationCount < before.maxActivations
+        && (before.get('expiresAt', null) == null || before.expiresAt > request.time)
+        && after.diff(before).affectedKeys().hasOnly(['status', 'installationId', 'activationCount', 'lastValidated'])
+        && after.status == 'ACTIVE'
+        && after.activationCount == before.activationCount + 1
+        && after.lastValidated == request.time
+        && after.installationId is string && after.installationId.size() >= 8
+        && isTenantAdminAnyState(before.tenantId);
+    }
+
+    match /licenseEvents/{id} {
+      allow read: if isPlatformAdmin();
+      allow create: if validLicenseEvent();
+      allow update, delete: if false;
+    }
+    function validLicenseEvent() {
+      let d = request.resource.data;
+      return signedIn()
+        && d.actorId == request.auth.uid
+        && d.at == request.time
+        && d.licenseId is string && d.licenseId.matches('^[0-9a-f]{64}$')
+        && d.keys().hasOnly(['licenseId', 'tenantId', 'type', 'actorId', 'at', 'metadata'])
+        && (isPlatformAdmin()
+            || (d.type in ['ACTIVATED', 'REACTIVATED']
+                && getAfter(licensePath(d.licenseId)).data.tenantId == d.tenantId
+                && getAfter(licensePath(d.licenseId)).data.status == 'ACTIVE'));
+    }
+
+    // =========================================================================
+    // Public, non-sensitive school pages (login branding)
+    // =========================================================================
+    match /slugs/{slug} {
+      allow get: if true;
+      allow list, update, delete: if false;
+      // Only creatable while the tenant itself is being created in this batch.
+      allow create: if signedIn()
+        && slug.matches('^[a-z0-9][a-z0-9-]{2,39}$')
+        && request.resource.data.keys().hasOnly(['tenantId'])
+        && request.resource.data.tenantId is string
+        && !exists(tenantPath(request.resource.data.tenantId))
+        && getAfter(tenantPath(request.resource.data.tenantId)).data.ownerUid == request.auth.uid;
+    }
+
+    match /publicProfiles/{t} {
+      allow get: if true;
+      allow list: if isPlatformAdmin();
+      allow create: if signedIn()
+        && validPublicProfile(t)
+        && getAfter(tenantPath(t)).data.ownerUid == request.auth.uid;   // ownerUid is immutable
+      allow update: if hasRole(t, ['SCHOOL_ADMIN'])
+        && validPublicProfile(t)
+        && request.resource.data.slug == resource.data.slug;
+      allow delete: if false;
+    }
+    function validPublicProfile(t) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['tenantId', 'slug', 'name', 'motto', 'logoDataUrl', 'primaryColor', 'secondaryColor'])
+        && d.tenantId == t
+        && d.slug is string && d.slug.matches('^[a-z0-9][a-z0-9-]{2,39}$')
+        && d.name is string && d.name.size() >= 2 && d.name.size() <= 120
+        && d.motto is string && d.motto.size() <= 200
+        && (d.logoDataUrl == null
+            || (d.logoDataUrl is string && d.logoDataUrl.size() <= 70000
+                && d.logoDataUrl.matches('^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$')))
+        && d.primaryColor.matches('^#[0-9a-fA-F]{6}$')
+        && d.secondaryColor.matches('^#[0-9a-fA-F]{6}$');
+    }
+
+    // Pointer used by the client to find "which tenant am I in". It grants nothing:
+    // every real access check goes through members/{uid} under the tenant path.
+    match /userDirectory/{u} {
+      allow get: if signedIn() && request.auth.uid == u;
+      allow create: if signedIn()
+        && request.auth.uid == u
+        && request.resource.data.keys().hasOnly(['tenantId'])
+        && request.resource.data.tenantId is string
+        && existsAfter(memberPath(request.resource.data.tenantId, u));
+      allow list, update, delete: if false;
+    }
+
+    // =========================================================================
+    // Tenants
+    // =========================================================================
+    match /tenants/{t} {
+      allow get: if isPlatformAdmin() || isMemberAnyState(t);
+      allow list: if isPlatformAdmin();
+      allow create: if validTenantCreate(t);
+      // Order matters: branches that can raise an error for the caller (member lookups)
+      // come last, so a product owner (who has no member doc) never depends on error handling.
+      allow update: if (isPlatformAdmin() && platformTenantEdit())
+                    || tenantReactivation(t)
+                    || (hasRole(t, ['SCHOOL_ADMIN']) && tenantSettingsEdit());
+      allow delete: if false;
+    }
+
+    function validTenantCreate(t) {
+      let d = request.resource.data;
+      let lb = get(licensePath(d.licenseId)).data;
+      let la = getAfter(licensePath(d.licenseId)).data;
+      return signedIn()
+        && d.keys().hasOnly(['name', 'ownerUid', 'licenseId', 'plan', 'status', 'installationId', 'expiresAt',
+             'profile', 'settings', 'setupComplete', 'createdAt'])
+        && d.ownerUid == request.auth.uid
+        && d.status == 'ACTIVE'
+        && d.setupComplete == false
+        && d.createdAt == request.time
+        && d.name is string && d.name.size() >= 2 && d.name.size() <= 120
+        && lb.status == 'UNUSED'
+        && la.status == 'ACTIVE'
+        && la.tenantId == t
+        && la.activatedBy == request.auth.uid
+        && la.installationId == d.installationId
+        && d.plan == lb.plan
+        && d.get('expiresAt', null) == lb.get('expiresAt', null);
+    }
+
+    // School admins may edit presentation/config only; never owner, license, status, plan, expiry.
+    function tenantSettingsEdit() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['name', 'profile', 'settings', 'setupComplete', 'updatedAt']);
+    }
+    // Product owner may only change commercial/status fields; never school data.
+    function platformTenantEdit() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'expiresAt', 'plan', 'updatedAt'])
+        && request.resource.data.status in ['ACTIVE', 'SUSPENDED'];
+    }
+    // After an owner "reset installation": the school admin proves possession of the
+    // key by re-activating the license, and the tenant is switched back on.
+    function tenantReactivation(t) {
+      let la = getAfter(licensePath(resource.data.licenseId)).data;
+      return isTenantAdminAnyState(t)
+        && resource.data.status == 'SUSPENDED'
+        && request.resource.data.status == 'ACTIVE'
+        && get(licensePath(resource.data.licenseId)).data.status == 'RESET'
+        && la.status == 'ACTIVE'
+        && la.tenantId == t
+        && request.resource.data.installationId == la.installationId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'installationId', 'updatedAt']);
+    }
+
+    // ---------- members ----------
+    match /tenants/{t}/members/{m} {
+      allow get: if signedIn() && request.auth.uid == m;
+      allow list: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']);
+      // Only the tenant owner (license activator) can create their own admin membership.
+      allow create: if signedIn()
+        && request.auth.uid == m
+        && getAfter(tenantPath(t)).data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['uid', 'tenantId', 'role', 'status', 'displayName', 'email'])
+        && request.resource.data.uid == m
+        && request.resource.data.tenantId == t
+        && request.resource.data.role == 'SCHOOL_ADMIN'
+        && request.resource.data.status == 'ACTIVE';
+      allow update, delete: if false;   // user management arrives in Phase 8/9
+    }
+
+    // ---------- school configuration collections ----------
+    match /tenants/{t}/classes/{id} {
+      allow read: if isMember(t);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']) && validNamed(t);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']) && validNamed(t)
+                    && request.resource.data.tenantId == resource.data.tenantId;
+      allow delete: if hasRole(t, ['SCHOOL_ADMIN']);
+    }
+    match /tenants/{t}/subjects/{id} {
+      allow read: if isMember(t);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']) && validNamed(t);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']) && validNamed(t)
+                    && request.resource.data.tenantId == resource.data.tenantId;
+      allow delete: if hasRole(t, ['SCHOOL_ADMIN']);
+    }
+    match /tenants/{t}/terms/{id} {
+      allow read: if isMember(t);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']) && validNamed(t);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']) && validNamed(t)
+                    && request.resource.data.tenantId == resource.data.tenantId;
+      allow delete: if hasRole(t, ['SCHOOL_ADMIN']);
+    }
+    function validNamed(t) {
+      return request.resource.data.tenantId == t
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 1
+        && request.resource.data.name.size() <= 100;
+    }
+
+    // ---------- audit log: append-only, actor must be the caller ----------
+    match /tenants/{t}/auditLogs/{id} {
+      allow read: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'TEACHER', 'ACCOUNTANT', 'STAFF'])
+        && request.resource.data.actorId == request.auth.uid
+        && request.resource.data.tenantId == t
+        && request.resource.data.timestamp == request.time
+        && request.resource.data.keys().hasOnly(['actorId', 'tenantId', 'action', 'target', 'timestamp', 'metadata']);
+      allow update, delete: if false;
+    }
+
+    // Everything else is denied until its phase adds explicit, tested rules.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
