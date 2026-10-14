@@ -1,109 +1,105 @@
-# School Platform — Batch 1 (Phases 1–6)
+# School Platform — Batch 2 (Phases 1–9)
 
 Multi-tenant, white-label school platform on **Firebase Spark (no Cloud Functions, no Storage)**.
 One codebase serves every school. **Flat layout: every project file lives in this one folder.**
 
-> **Status:** Phases 1–6 (architecture, Firebase setup, auth, multi-tenancy, license system, onboarding)
-> plus a minimal school dashboard shell and the product-owner console. Student/teacher/attendance/fees/
-> assignments/exams/results/Drive/notifications/analytics/PWA arrive in Phases 7–18.
+**Built:** licensing, onboarding, branded login, product-owner console, and (new in this batch) school settings,
+academics (classes/subjects/terms), students, teachers, parents, user management, CSV import, first-login password
+change, teacher class-scoping and role-based navigation.
+**Not built yet:** attendance, fees, assignments, exams, results, Drive, notifications, analytics, PWA (Phases 10–18).
 
-## 1. Quick start
+## 1. Upgrading from Batch 1 (do these in order)
+1. Replace all project files with this batch (keep your `.env`, or re-enter the 4 variables on GitHub).
+2. **Publish the new `firestore.rules`** (Firebase Console → Firestore → Rules → paste → Publish). Without this the new
+   screens will show "You don't have permission". Existing schools keep working: nothing in their data changes.
+3. Redeploy the site (GitHub: upload the files; Firebase Hosting: `npm run deploy`).
+4. Run the rules tests (section 6) before putting real schools on it.
 
+## 2. Quick start
 ```bash
 npm install
 cp .env.example .env        # fill in the 4 Firebase values
 npm run dev                 # http://localhost:5173
-npm test                    # 55 unit/UI tests (no Firebase needed)
+npm test                    # 151 tests, no Firebase needed
 npm run typecheck && npm run build
 ```
+Firebase setup (Spark): create project → add Web app → enable Email/Password → create Firestore (production mode) →
+publish `firestore.rules` → create your owner account (Authentication → Add user; then Firestore collection
+`platformAdmins`, document ID = that user's UID, any field). Optional but recommended: App Check (reCAPTCHA v3) and set
+`VITE_APPCHECK_SITE_KEY`.
 
-### Firebase one-time setup (Spark plan)
-1. Console → create project (stay on **Spark**). Add a **Web app**; copy its config into `.env`.
-2. Authentication → Sign-in method → enable **Email/Password**.
-3. Firestore → Create database (production mode).
-4. Deploy rules + indexes: `npx firebase login && npx firebase use <project-id> && npm run deploy:rules`
-5. **Create the product-owner account:** Authentication → Add user (your email). Copy its UID.
-   Firestore → start collection `platformAdmins` → document ID = that UID → any field (e.g. `x: 1`).
-   This is the *only* way to become product owner; no client can write that collection.
-6. (Recommended, free) App Check → register reCAPTCHA v3 → put the site key in `VITE_APPCHECK_SITE_KEY`
-   → enforce for Firestore and Auth after testing.
-7. Hosting: `npm run deploy`.
-
-### Selling to a school
-Product owner opens `/#/platform` → Generate licenses → send the key to the customer (it is shown once; only its
-hash is stored). Customer opens `/#/activate`, enters the key, creates the first admin, configures the school.
-Their staff then sign in at `/#/s/<school-address>`.
-
-## 2. Architecture (Spark-only)
-
-Spark has no server code, so **Firestore Security Rules are the trusted backend.** Everything below is enforced
-in `firestore.rules`, never by the browser.
-
-| Concern | Mechanism |
+## 3. What each role can do
+| Role | Sees |
 |---|---|
-| Tenant identity | Taken from the document **path** (`/tenants/{t}/…`), never from a client field. |
-| Who is a member / role | `/tenants/{t}/members/{uid}` — created only in the activation batch by the license activator. |
-| Product owner | Existence of `/platformAdmins/{uid}` (console-only). Owner can read tenant *records* but **not** school data. |
-| License | Doc ID = `SHA-256(key)`; 80-bit key (`SC-XXXX-XXXX-XXXX-XXXX`, Crockford base32, `crypto.getRandomValues`). |
-| One-time activation | Rules allow `UNUSED→ACTIVE`, count 0→1, only in the same atomic batch that creates the tenant owned by the caller. Concurrent attempts: Firestore commits one, the other is denied. |
-| Key can never serve another tenant | `tenantId` is immutable once set (even for the owner). |
-| Suspend / expire | Every tenant data rule checks `tenant.status` and `tenant.expiresAt` — expiry needs no cron job. |
-| Reset installation | Owner sets license `RESET` + tenant `SUSPENDED`; only that tenant's admin, holding the key, can restore. |
-| Audit | `/tenants/{t}/auditLogs` append-only; `actorId` forced to caller; server timestamp forced. |
+| SCHOOL_ADMIN | Everything: Academics, Students, Teachers, Parents, Users, Import, Settings |
+| PRINCIPAL | Academics (edit), Students and Teachers (read-only) |
+| TEACHER | Overview and **My classes** (only assigned classes, enforced by rules) |
+| ACCOUNTANT / STAFF | Students (read); STAFF also Teachers (read) |
+| STUDENT / PARENT | Overview now; portals arrive in later phases |
 
-Data model (flat under the tenant, no deep nesting):
-`licenses/{hash}`, `licenseEvents/{id}`, `platformAdmins/{uid}`, `slugs/{slug}`, `publicProfiles/{tenantId}`,
-`userDirectory/{uid}`, `tenants/{t}` + `members`, `classes`, `subjects`, `terms`, `auditLogs` (more per phase).
+The matrix lives in `lib-permissions.ts` (UI) and `firestore.rules` (enforcement); `rules-lint.test.ts` keeps what the
+app writes aligned with what the rules accept.
 
-## 3. Honest limitations of Spark-only (read before selling)
+## 4. How accounts work on Spark
+Spark has no Admin SDK, so the browser creates other people's logins using a **second Firebase app instance**
+(the admin is never signed out). The admin sets nothing: a random 12-character temporary password is generated and
+shown **once**. The new account has **no data access** (enforced in `hasRole`) until the person replaces it on first
+sign-in. If saving the school records fails, the new login is deleted again (rollback).
+- Teachers/parents with a real email sign in with it. Students (and parents without email) sign in with a username:
+  the admission number / generated `parent-xxxxxx`, mapped to a private address `…@<school>.login.invalid`.
+- "Forgot password?" works for real emails. Username-only accounts cannot be reset on Spark: create a new account.
+- Admission numbers: `<PREFIX>-<YEAR>-<0001>` from a counter that only moves forward; the document ID **is** the
+  admission number, so duplicates are impossible. Custom numbers are stored upper-case.
 
-1. **No server-side rate limiting.** Failed activation attempts cannot be throttled or logged server-side. Defence:
-   80-bit keys (infeasible to guess), App Check, and a client-side backoff that is *cosmetic*. 
-2. **Audit logs are client-written.** Rules force correct actor/time and make them append-only, but a malicious
-   admin using their own session could omit entries. Truly tamper-proof audit needs Cloud Functions (Blaze).
-3. **Cannot create/disable Auth users server-side.** Suspension is enforced by rules (members/tenant status),
-   not by disabling the Auth account.
-4. **Rule `get()` calls count as billed reads.** Each guarded request costs ~2 extra reads (member + tenant).
-5. **No Cloud Storage.** Logos are shrunk to ≤60 KB and stored inline; files go to Google Drive (Phase 15).
-6. **Quota is shared by all schools in one Firebase project.** Check current Spark quotas in the console. The usage
-   dashboard (Phase 17) can only *estimate* from operations the app itself performs.
-7. **License-binding is by tenant, not hardware.** "Installation reset" is an owner-controlled transfer, by design.
-8. **Setup that fails after activation** can be resumed in the same session; across sessions the dashboard shows
-   an "incomplete setup" banner (management screens come in later phases).
-9. **Offline cache is wiped on sign-out** (shared school computers); this makes the next login's first reads cold.
+## 5. Honest limitations (read before selling)
+1. **No server-side rate limiting** on license attempts (key space 80 bits + App Check; client backoff is cosmetic).
+2. **Audit logs are client-written** (append-only, actor forced by rules) so a malicious admin could skip an entry.
+3. **A school admin knows each new user's temporary password** until they change it (the app forces the change).
+4. **No password reset for username-only accounts.**
+5. **Rule lookups are billed reads** (~2 per guarded request). The quota is shared by all schools in one project.
+6. **All members can read their school's tenant document**, which contains internal ids (license hash, owner id).
+   No student data or key is in it. Splitting it would need a second document (planned hardening).
+7. **No server-side referential integrity**: e.g. deleting/archiving a class does not check students (we archive
+   instead of delete). The UI offers only active classes for new records.
+8. **Bulk import writes in batches of 8** and reports per-row failures; a failure mid-import leaves earlier batches saved.
+9. **Offline cache is wiped on sign-out** (shared school computers).
+10. Photos/logos are small inline images (≤ 28 KB / 60 KB) because Spark has no Cloud Storage.
 
-## 4. Testing — what was actually run
+### Assumptions I could not verify without a live project (please check in your test school)
+- Firebase Auth accepts the reserved `.invalid` domain for username accounts. (If not, student/parent username
+  sign-in needs a different suffix: one constant in `lib-accounts.ts`.)
+- Teacher-scoped student queries (`where classId == X`) satisfy the rule that compares against the teacher's
+  `classIds`. Covered by `rules.test.ts`; run it.
+- A 9-operation batch stays under the rules' 20 document-access-call limit (designed with margin; emulator test needed).
 
-| Suite | Command | Status in build sandbox |
+## 6. Testing — what was actually run
+| Suite | Command | Status in my sandbox |
 |---|---|---|
-| Logic (keys, hashing, grading, activation/ops plans, errors, theme) | `npm test` | ✅ 28 tests pass |
-| UI + wizard flows with mocked Firebase (verification outcomes, race, resume, lock-out, dashboard states) | `npm test` | ✅ 27 tests pass |
-| Strict TypeScript | `npm run typecheck` | ✅ clean |
-| Production build | `npm run build` | ✅ passes (code-split) |
-| **Firestore rules (cross-tenant, activation, owner, audit, public data)** | `npm run test:rules` | ⚠️ **Written, NOT executed** — the sandbox blocks the emulator download. **Run this before going live.** |
+| Logic: keys, hashing, grading, CSV, validation, permissions, accounts, plans | `npm test` | ✅ pass |
+| UI + flows against an in-memory Firestore: every screen above, role gating, imports, failures | `npm test` | ✅ pass |
+| Rules lint: syntax balance, undefined helpers, **app writes ⊆ rules-allowed keys** (mutation-checked) | `npm test` | ✅ pass |
+| Strict TypeScript / production build | `npm run typecheck` / `npm run build` | ✅ pass |
+| **Firestore rules against the emulator (isolation, activation, accounts, students, counters…)** | `npm run test:rules` | ⚠️ **Written, NOT executed** (emulator download blocked in my sandbox). **Run before going live.** |
 
-Not tested at all yet: real browser/device runs, live Firebase, accessibility audit with a screen reader.
+Never tested: real browsers/devices, live Firebase, screen readers, real email delivery.
+Run the emulator tests: install Java, `npm install`, `npm run test:rules`. Paste any failure to me.
 
-## 5. Phase status
+## 7. Deploying
+- **Firebase Hosting (private source, recommended for resale):** `npx firebase login`, `npx firebase use <id>`, `npm run deploy`.
+- **GitHub Pages:** push to `main`; set Settings → Pages → Source = GitHub Actions; add the 4 `VITE_FIREBASE_*` values under
+  Settings → Secrets and variables → Actions → **Variables**; add `<user>.github.io` to Firebase Authorized domains.
+  Public repos expose your source; private repos need a paid GitHub plan for Pages. Pages ignores `firebase.json` headers
+  and never deploys Firestore rules.
 
+## 8. Files (flat)
+`firestore.rules` · `firestore.indexes.json` · `firebase.json` · `lib-*.ts` (logic) · `ctx-auth.tsx`, `ctx-tenant.tsx` ·
+`page-*.tsx` (screens) · `ui.tsx`, `ui-editors.tsx` · `use-action.ts` · `styles.css` · `*.test.ts(x)` · `test-store.ts` (test fake) ·
+`.github/workflows/deploy.yml` (GitHub requires this exact path) · `.env.example`, `.gitignore` (dotfiles: show hidden files).
+
+## 9. Phase status
 | Phase | State |
 |---|---|
-| 1 Architecture · 2 Firebase setup · 3 Auth · 4 Multi-tenancy · 5 License · 6 Onboarding | Built (rules need your emulator run) |
-| 7 Admin dashboard | Shell only (overview) |
-| 8–17 Students … Analytics · 18 PWA · 19 Security audit · 20 Testing · 21 Deploy | Not started |
-
-## 6. Files (flat)
-`firestore.rules` · `firestore.indexes.json` · `firebase.json` · `lib-*.ts` (logic) · `ctx-auth.tsx` ·
-`page-*.tsx` (screens) · `ui.tsx` · `styles.css` · `*.test.ts(x)` · `rules.test.ts`
-
-## 7. Deploying on GitHub Pages
-1. Create a repo, push this folder to `main` (`.env` and `node_modules` are git-ignored; keep `package-lock.json`).
-2. Settings → Pages → Source: **GitHub Actions**.
-3. Settings → Secrets and variables → Actions → **Variables**: add `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`,
-   `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID` (and `VITE_APPCHECK_SITE_KEY`). These are public identifiers.
-4. Firebase Console → Authentication → Settings → **Authorized domains**: add `<your-user>.github.io` (and any custom domain).
-   Add the same domain to your reCAPTCHA/App Check key.
-5. Push. The workflow type-checks, tests, builds and publishes. Pages does NOT deploy Firestore rules:
-   run `npm run deploy:rules` yourself whenever `firestore.rules` changes.
-Notes: Pages ignores the security headers in `firebase.json` (no clickjacking header). Private repos need a paid GitHub plan for Pages.
-A public repo exposes your source code, which matters if you resell it; use a private repo with Firebase Hosting instead.
+| 1–6 Architecture, Firebase, Auth, Tenancy, License, Onboarding | Built (rules need your emulator run) |
+| 7 Admin dashboard · 8 Students · 9 Teachers (+ parents, users, settings, import) | **Built this batch** |
+| 10 Attendance · 11 Fees · 12 Assignments · 13 Exams · 14 Results | Not started |
+| 15 Drive · 16 Notifications · 17 Analytics · 18 PWA · 19 Security audit · 20 Testing · 21 Deploy | Not started |

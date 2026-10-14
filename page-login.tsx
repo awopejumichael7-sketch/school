@@ -1,12 +1,14 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
 import { doc, getDoc } from 'firebase/firestore';
+import { sendPasswordResetEmail } from 'firebase/auth';
 import { firebase } from './lib-firebase';
 import { useAuth } from './ctx-auth';
 import { Alert, Button, Field, Spinner } from './ui';
-import { friendlyError, logTechnical } from './lib-errors';
+import { errorCode, friendlyError, logTechnical } from './lib-errors';
 import { applyBranding, resetBranding } from './lib-theme';
 import { isValidSlug } from './lib-config';
+import { loginIdToEmail } from './lib-accounts';
 import type { PublicProfile } from './types';
 
 type Load = { s: 'loading' } | { s: 'missing' } | { s: 'error' } | { s: 'ready'; profile: PublicProfile };
@@ -19,6 +21,7 @@ export default function SchoolLogin() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -66,12 +69,28 @@ export default function SchoolLogin() {
   }
   const signedInElsewhere = auth.status === 'ready' && auth.user && auth.tenantId !== profile.tenantId;
 
+  /** Works for people who signed up with a real email. Username-only accounts must ask their administrator. */
+  async function forgot() {
+    setError(null); setNotice(null);
+    if (!email.includes('@')) {
+      return setError('Enter the email address you sign in with, then choose "Forgot password?". If you sign in with a username, ask your school administrator.');
+    }
+    try {
+      await sendPasswordResetEmail(firebase().auth, email.trim());
+    } catch (err) {
+      logTechnical('forgot', err);
+      if (errorCode(err) !== 'auth/user-not-found') return setError(friendlyError(err));
+    }
+    // Same message whether or not the account exists (does not reveal who has an account).
+    setNotice('If an account exists for that email, a password reset link has been sent.');
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setBusy(true);
     try {
-      await auth.signIn(email, password);
+      await auth.signIn(loginIdToEmail(email, slug), password);
       setPassword('');
     } catch (err) {
       logTechnical('login', err);
@@ -95,9 +114,11 @@ export default function SchoolLogin() {
         ) : (
           <form onSubmit={submit} noValidate>
             {error && <Alert>{error}</Alert>}
-            <Field label="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required />
+            <Field label="Email or username" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" autoCapitalize="none" spellCheck={false} required />
             <Field label="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+            {notice && <Alert kind="info">{notice}</Alert>}
             <Button type="submit" busy={busy}>Sign in</Button>
+            <p><Button type="button" variant="ghost" onClick={() => void forgot()}>Forgot password?</Button></p>
           </form>
         )}
         {auth.status === 'ready' && auth.user && auth.tenantId === profile.tenantId && !auth.member && (

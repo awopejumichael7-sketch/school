@@ -1,4 +1,4 @@
-import { initializeApp, type FirebaseApp } from 'firebase/app';
+import { getApps, initializeApp, type FirebaseApp } from 'firebase/app';
 import { getAuth, type Auth } from 'firebase/auth';
 import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 import {
@@ -15,6 +15,14 @@ const cfg = {
 /** False until .env is filled in; the UI shows a setup screen instead of crashing. */
 export const isConfigured = Boolean(cfg.apiKey && cfg.projectId && cfg.appId);
 
+function enableAppCheck(app: FirebaseApp): void {
+  const siteKey = import.meta.env.VITE_APPCHECK_SITE_KEY as string | undefined;
+  if (siteKey) {
+    // Free abuse protection: blocks requests not coming from this genuine web app.
+    initializeAppCheck(app, { provider: new ReCaptchaV3Provider(siteKey), isTokenAutoRefreshEnabled: true });
+  }
+}
+
 interface Services { app: FirebaseApp; auth: Auth; db: Firestore }
 let services: Services | null = null;
 
@@ -22,12 +30,7 @@ export function firebase(): Services {
   if (services) return services;
   if (!isConfigured) throw new Error('Firebase is not configured');
   const app = initializeApp(cfg);
-
-  const siteKey = import.meta.env.VITE_APPCHECK_SITE_KEY as string | undefined;
-  if (siteKey) {
-    // Free abuse protection: blocks requests not coming from this genuine web app.
-    initializeAppCheck(app, { provider: new ReCaptchaV3Provider(siteKey), isTokenAutoRefreshEnabled: true });
-  }
+  enableAppCheck(app);
 
   let db: Firestore;
   try {
@@ -38,4 +41,18 @@ export function firebase(): Services {
   }
   services = { app, auth: getAuth(app), db };
   return services;
+}
+
+/**
+ * A SECOND Firebase app instance used only to create other people's login accounts. Creating a user signs
+ * that user in, so doing it on the main instance would log the admin out. (Spark has no Admin SDK.)
+ */
+export function secondaryAuth(): Auth {
+  const { app } = firebase();
+  let sec = getApps().find((a) => a.name === 'secondary');
+  if (!sec) {
+    sec = initializeApp(app.options, 'secondary');
+    enableAppCheck(sec);
+  }
+  return getAuth(sec);
 }

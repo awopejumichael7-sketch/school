@@ -65,7 +65,7 @@ export default function App() {
             <Route path="/s/:slug" element={<SchoolLogin />} />
             <Route path="/activate" element={<Onboarding />} />
             <Route path="/platform" element={<Platform />} />
-            <Route path="/app" element={<Dashboard />} />
+            <Route path="/app/*" element={<Dashboard />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           </Suspense>

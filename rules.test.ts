@@ -8,11 +8,13 @@ import {
   initializeTestEnvironment, assertFails, assertSucceeds, type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { doc, getDoc, getDocs, collection, setDoc, updateDoc, deleteDoc, serverTimestamp, type Firestore } from 'firebase/firestore';
+import { doc, getDoc, getDocs, collection, query, where, setDoc, updateDoc, deleteDoc, serverTimestamp, type Firestore } from 'firebase/firestore';
 import { applyOps } from './lib-ops';
 import { buildActivationPlan, buildReactivationPlan, type ActivationInput } from './lib-activation';
 import { planLicenseAction } from './lib-licenseAdmin';
 import { DEFAULT_ASSESSMENT, DEFAULT_GRADING } from './lib-config';
+import { buildMemberOps } from './lib-accounts';
+import { buildStudentDoc, buildTeacherDoc, buildParentDoc, buildStudentUpdate, type StudentInput } from './lib-people';
 
 const H = 'a'.repeat(64);
 const H2 = 'b'.repeat(64);
@@ -247,5 +249,140 @@ describe('audit log, public data, default deny', () => {
   it('unknown collections are denied', async () => {
     await assertFails(getDoc(doc(fs('adminA'), 'secrets/1')));
     await assertFails(setDoc(doc(fs('adminA'), 'secrets/1'), { a: 1 }));
+  });
+});
+
+
+// ============================================================ Phases 7-9 additions
+const sInput: StudentInput = {
+  firstName: 'Ada', middleName: '', lastName: 'Okafor', gender: 'FEMALE', dateOfBirth: '2014-05-21', classId: 'c1',
+  phone: '', email: '', address: '', admissionNumber: '', admissionDate: '2026-09-14',
+};
+const studentCtx = (t: string, adm: string, uid: string | null = null) =>
+  ({ tenantId: t, admissionNumber: adm, academicSession: '2026', photo: null, uid, createdBy: 'adminA' });
+const studentRaw = (t: string, adm: string, over: Record<string, unknown> = {}) => ({
+  tenantId: t, studentId: adm, admissionNumber: adm, firstName: 'Ada', middleName: '', lastName: 'Okafor', gender: 'FEMALE',
+  dateOfBirth: '2014-05-21', photo: null, classId: 'c1', parentIds: [], phone: '', email: '', address: '',
+  admissionDate: '2026-09-14', status: 'ACTIVE', academicSession: '2026', uid: null, ...over,
+});
+
+describe('admin-created accounts', () => {
+  beforeEach(async () => { await seedTenant('tenantA', 'adminA'); await seedTenant('tenantB', 'adminB'); });
+
+  it('admin creates a teacher (member + directory + teacher doc) in one batch', async () => {
+    const ops = [
+      { kind: 'set' as const, path: 'tenants/tenantA/teachers/newT', data: buildTeacherDoc({ name: 'Mrs Bello', email: 'b@x.com', phone: '', subjects: [], classes: ['c1'] }, { tenantId: 'tenantA', uid: 'newT', photo: null, createdBy: 'adminA' }) },
+      ...buildMemberOps({ tenantId: 'tenantA', uid: 'newT', role: 'TEACHER', displayName: 'Mrs Bello', email: 'b@x.com', loginId: 'b@x.com', classIds: ['c1'] }),
+    ];
+    await assertSucceeds(applyOps(fs('adminA'), ops));
+  });
+  it('a school admin cannot put anyone into ANOTHER school, nor steal a user who already has a school', async () => {
+    const toB = buildMemberOps({ tenantId: 'tenantB', uid: 'x1', role: 'TEACHER', displayName: 'X', email: '', loginId: 'x' });
+    await assertFails(applyOps(fs('adminA'), toB));
+    await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore() as unknown as Firestore, 'userDirectory/existingB'), { tenantId: 'tenantB' }); });
+    await assertFails(applyOps(fs('adminA'), buildMemberOps({ tenantId: 'tenantA', uid: 'existingB', role: 'TEACHER', displayName: 'X', email: '', loginId: 'x' })));
+  });
+  it('only a school admin can create members', async () => {
+    await assertFails(applyOps(fs('teach-tenantA'), buildMemberOps({ tenantId: 'tenantA', uid: 'y1', role: 'STAFF', displayName: 'Y', email: '', loginId: 'y' })));
+    await assertFails(applyOps(fs('stud-tenantA'), buildMemberOps({ tenantId: 'tenantA', uid: 'y2', role: 'SCHOOL_ADMIN', displayName: 'Y', email: '', loginId: 'y' })));
+  });
+  it('a new account has NO data access until it replaces its temporary password', async () => {
+    await applyOps(fs('adminA'), buildMemberOps({ tenantId: 'tenantA', uid: 'newbie', role: 'TEACHER', displayName: 'N', email: 'n@x.com', loginId: 'n@x.com' }));
+    await assertFails(getDoc(doc(fs('newbie'), 'tenants/tenantA/classes/c1')));
+    await assertSucceeds(getDoc(doc(fs('newbie'), 'tenants/tenantA/members/newbie')));
+    await assertFails(updateDoc(doc(fs('newbie'), 'tenants/tenantA/members/newbie'), { role: 'SCHOOL_ADMIN', mustChangePassword: false }));
+    await assertSucceeds(updateDoc(doc(fs('newbie'), 'tenants/tenantA/members/newbie'), { mustChangePassword: false }));
+    await assertSucceeds(getDoc(doc(fs('newbie'), 'tenants/tenantA/classes/c1')));
+    await assertFails(updateDoc(doc(fs('newbie'), 'tenants/tenantA/members/newbie'), { mustChangePassword: true }));
+  });
+  it('admins manage others but never themselves, and cannot move a member to another tenant', async () => {
+    await assertSucceeds(updateDoc(doc(fs('adminA'), 'tenants/tenantA/members/teach-tenantA'), { status: 'DISABLED' }));
+    await assertFails(updateDoc(doc(fs('adminA'), 'tenants/tenantA/members/adminA'), { status: 'DISABLED' }));
+    await assertFails(updateDoc(doc(fs('adminA'), 'tenants/tenantA/members/adminA'), { role: 'STAFF' }));
+    await assertFails(updateDoc(doc(fs('adminA'), 'tenants/tenantA/members/teach-tenantA'), { tenantId: 'tenantB' }));
+    await assertFails(updateDoc(doc(fs('adminB'), 'tenants/tenantA/members/teach-tenantA'), { status: 'DISABLED' }));
+    await assertFails(updateDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/members/stud-tenantA'), { status: 'DISABLED' }));
+  });
+});
+
+describe('students, teachers, parents', () => {
+  beforeEach(async () => {
+    await seedTenant('tenantA', 'adminA'); await seedTenant('tenantB', 'adminB');
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore() as unknown as Firestore;
+      await updateDoc(doc(db, 'tenants/tenantA/members/teach-tenantA'), { classIds: ['c1'] });
+      await setDoc(doc(db, 'tenants/tenantA/members/par-A'), { uid: 'par-A', tenantId: 'tenantA', role: 'PARENT', status: 'ACTIVE' });
+      await setDoc(doc(db, 'tenants/tenantA/students/AAA-1'), studentRaw('tenantA', 'AAA-1', { classId: 'c1', parentIds: ['par-A'], uid: 'stud-tenantA' }));
+      await setDoc(doc(db, 'tenants/tenantA/students/AAA-2'), studentRaw('tenantA', 'AAA-2', { classId: 'c2' }));
+      await setDoc(doc(db, 'tenants/tenantB/students/BBB-1'), studentRaw('tenantB', 'BBB-1'));
+      await setDoc(doc(db, 'tenants/tenantA/teachers/teach-tenantA'), { tenantId: 'tenantA', uid: 'teach-tenantA', name: 'T', status: 'ACTIVE' });
+      await setDoc(doc(db, 'tenants/tenantA/parents/par-A'), { tenantId: 'tenantA', uid: 'par-A', name: 'P', childIds: ['AAA-1'], status: 'ACTIVE' });
+    });
+  });
+  const col = (u: string | null, t: string, c: string) => collection(fs(u), `tenants/${t}/${c}`);
+
+  it('admin creates and edits students; ID must equal the admission number', async () => {
+    const okDoc = buildStudentDoc(sInput, studentCtx('tenantA', 'AAA-3'));
+    await assertSucceeds(setDoc(doc(fs('adminA'), 'tenants/tenantA/students/AAA-3'), okDoc));
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantA/students/OTHER-ID'), okDoc));
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantA/students/AAA-4'), { ...buildStudentDoc(sInput, studentCtx('tenantA', 'AAA-4')), gender: 'X' }));
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantA/students/AAA-5'), { ...buildStudentDoc(sInput, studentCtx('tenantA', 'AAA-5')), photo: 'https://evil.example/p.png' }));
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantB/students/AAA-6'), buildStudentDoc(sInput, studentCtx('tenantB', 'AAA-6'))));
+    await assertSucceeds(updateDoc(doc(fs('adminA'), 'tenants/tenantA/students/AAA-1'), buildStudentUpdate({ ...sInput, classId: 'c2' }, null)));
+    await assertFails(updateDoc(doc(fs('adminA'), 'tenants/tenantA/students/AAA-1'), { admissionNumber: 'HACK-1' }));
+    await assertFails(updateDoc(doc(fs('adminA'), 'tenants/tenantA/students/AAA-1'), { tenantId: 'tenantB' }));
+  });
+  it('overwriting an existing admission number is refused', async () => {
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantA/students/AAA-1'), buildStudentDoc(sInput, studentCtx('tenantA', 'AAA-1'))));
+  });
+  it('a teacher sees only students of assigned classes', async () => {
+    await assertSucceeds(getDocs(query(col('teach-tenantA', 'tenantA', 'students'), where('classId', '==', 'c1'))));
+    await assertFails(getDocs(query(col('teach-tenantA', 'tenantA', 'students'), where('classId', '==', 'c2'))));
+    await assertFails(getDocs(col('teach-tenantA', 'tenantA', 'students')));
+    await assertFails(getDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/students/AAA-2')));
+    await assertFails(setDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/students/AAA-9'), buildStudentDoc(sInput, studentCtx('tenantA', 'AAA-9'))));
+  });
+  it('a parent sees only their own children; a student only themselves', async () => {
+    await assertSucceeds(getDocs(query(col('par-A', 'tenantA', 'students'), where('parentIds', 'array-contains', 'par-A'))));
+    await assertFails(getDoc(doc(fs('par-A'), 'tenants/tenantA/students/AAA-2')));
+    await assertFails(getDocs(col('par-A', 'tenantA', 'students')));
+    await assertSucceeds(getDoc(doc(fs('stud-tenantA'), 'tenants/tenantA/students/AAA-1')));
+    await assertFails(getDoc(doc(fs('stud-tenantA'), 'tenants/tenantA/students/AAA-2')));
+  });
+  it('nobody reads another school\'s students; the product owner reads none', async () => {
+    await assertFails(getDoc(doc(fs('adminA'), 'tenants/tenantB/students/BBB-1')));
+    await assertFails(getDoc(doc(fs('owner1'), 'tenants/tenantA/students/AAA-1')));
+    await assertFails(getDocs(col('owner1', 'tenantA', 'students')));
+  });
+  it('accountants and staff can read students but not write', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore() as unknown as Firestore;
+      await setDoc(doc(db, 'tenants/tenantA/members/acct'), { uid: 'acct', tenantId: 'tenantA', role: 'ACCOUNTANT', status: 'ACTIVE' });
+    });
+    await assertSucceeds(getDoc(doc(fs('acct'), 'tenants/tenantA/students/AAA-1')));
+    await assertFails(updateDoc(doc(fs('acct'), 'tenants/tenantA/students/AAA-1'), { phone: '1' }));
+  });
+  it('teachers: own record readable, others and listing are not; only admins write', async () => {
+    await assertSucceeds(getDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/teachers/teach-tenantA')));
+    await assertFails(getDocs(col('teach-tenantA', 'tenantA', 'teachers')));
+    await assertSucceeds(getDocs(col('adminA', 'tenantA', 'teachers')));
+    await assertFails(updateDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/teachers/teach-tenantA'), { name: 'Self edit' }));
+    await assertSucceeds(updateDoc(doc(fs('adminA'), 'tenants/tenantA/teachers/teach-tenantA'), { name: 'Renamed', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(fs('adminA'), 'tenants/tenantA/teachers/teach-tenantA'), { uid: 'someone-else' }));
+  });
+  it('parents: admin creates/links; a parent reads only their own record', async () => {
+    const pd = buildParentDoc({ name: 'Mr P', email: '', phone: '', childAdmissionNumbers: [] }, { tenantId: 'tenantA', uid: 'par-new', loginId: 'parent-x', childIds: [], createdBy: 'adminA' });
+    await assertSucceeds(setDoc(doc(fs('adminA'), 'tenants/tenantA/parents/par-new'), pd));
+    await assertSucceeds(getDoc(doc(fs('par-A'), 'tenants/tenantA/parents/par-A')));
+    await assertFails(getDoc(doc(fs('par-A'), 'tenants/tenantA/parents/par-new')));
+    await assertFails(setDoc(doc(fs('par-A'), 'tenants/tenantA/parents/par-x'), pd));
+  });
+  it('admission counters only move forward by a bounded amount, admin only', async () => {
+    await assertSucceeds(setDoc(doc(fs('adminA'), 'tenants/tenantA/counters/students-2026'), { next: 2 }));
+    await assertSucceeds(setDoc(doc(fs('adminA'), 'tenants/tenantA/counters/students-2026'), { next: 5 }));
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantA/counters/students-2026'), { next: 1 }));
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantA/counters/students-2026'), { next: 5000 }));
+    await assertFails(setDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/counters/students-2026'), { next: 9 }));
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantB/counters/students-2026'), { next: 2 }));
   });
 });

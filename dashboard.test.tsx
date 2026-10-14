@@ -30,8 +30,8 @@ const tenant = (over: Record<string, unknown> = {}) => ({
   profile: { footer: '' }, settings: { academicSession: '2026/2027', terms: ['T1'], currency: 'NGN', timezone: 'Africa/Lagos' }, ...over,
 });
 const member = (over: Record<string, unknown> = {}) => ({ role: 'SCHOOL_ADMIN', status: 'ACTIVE', displayName: 'Ada', ...over });
-const show = () => render(<MemoryRouter initialEntries={['/app']}><Routes>
-  <Route path="/app" element={<Dashboard />} /><Route path="/" element={<p>LANDING</p>} /></Routes></MemoryRouter>);
+const show = (path = '/app') => render(<MemoryRouter initialEntries={[path]}><Routes>
+  <Route path="/app/*" element={<Dashboard />} /><Route path="/" element={<p>LANDING</p>} /></Routes></MemoryRouter>);
 
 beforeEach(() => cleanup());
 
@@ -62,16 +62,69 @@ describe('dashboard states', () => {
     show();
     expect(screen.getByText(/access suspended/i)).toBeInTheDocument();
   });
-  it('renders the active overview and marks future modules as unavailable', () => {
+  it('renders the active overview and marks future modules as unavailable', async () => {
     stub = { ...base, member: member(), tenant: tenant() };
     show();
-    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument();
-    expect(screen.getByText('2026/2027')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument();
+    expect(await screen.findByText('2026/2027')).toBeInTheDocument();
     expect(screen.getAllByTitle(/planned: phase/i).length).toBeGreaterThan(5);
   });
   it('signed-out users are sent to the landing page', () => {
     stub = { ...base, user: null, tenantId: null, member: null, tenant: null };
     show();
     expect(screen.getByText('LANDING')).toBeInTheDocument();
+  });
+
+  it('school admin sees every management screen', async () => {
+    stub = { ...base, member: member(), tenant: tenant() };
+    show();
+    await screen.findByRole('heading', { name: 'Overview' });
+    for (const l of ['Academics', 'Students', 'Teachers', 'Parents', 'Users', 'Import', 'Settings']) {
+      expect(screen.getAllByRole('link', { name: l }).length).toBeGreaterThan(0);
+    }
+    expect(screen.queryByRole('link', { name: 'My classes' })).not.toBeInTheDocument();
+    expect(screen.getByText('standard')).toBeInTheDocument(); // admins see the license card
+  });
+  it('license details are hidden from non-admins', async () => {
+    stub = { ...base, member: member({ role: 'TEACHER', classIds: [] }), tenant: tenant() };
+    show();
+    await screen.findByRole('heading', { name: 'Overview' });
+    expect(screen.queryByText('License')).not.toBeInTheDocument();
+    expect(screen.queryByText('standard')).not.toBeInTheDocument();
+    expect(await screen.findByText('2026/2027')).toBeInTheDocument();
+  });
+  it('a teacher only sees Overview and My classes, and cannot open admin URLs directly', async () => {
+    stub = { ...base, member: member({ role: 'TEACHER', classIds: [] }), tenant: tenant() };
+    show('/app/users');
+    expect(await screen.findByText(/don't have permission to view this page/i)).toBeInTheDocument();
+    const names = screen.getAllByRole('link').map((a) => a.textContent);
+    expect(new Set(names)).toEqual(new Set(['Overview', 'My classes']));
+    cleanup();
+    for (const path of ['/app/settings', '/app/import', '/app/teachers', '/app/students', '/app/parents', '/app/academics']) {
+      show(path);
+      expect(await screen.findByText(/don't have permission/i)).toBeInTheDocument();
+      cleanup();
+    }
+  });
+  it('students and parents only get the overview', async () => {
+    for (const role of ['STUDENT', 'PARENT']) {
+      stub = { ...base, member: member({ role }), tenant: tenant() };
+      show('/app/students');
+      expect(await screen.findByText(/don't have permission/i)).toBeInTheDocument();
+      expect(new Set(screen.getAllByRole('link').map((a) => a.textContent))).toEqual(new Set(['Overview']));
+      cleanup();
+    }
+  });
+  it('a principal can open Students and Teachers but not Users or Settings', async () => {
+    stub = { ...base, member: member({ role: 'PRINCIPAL' }), tenant: tenant() };
+    show();
+    await screen.findByRole('heading', { name: 'Overview' });
+    expect(new Set(screen.getAllByRole('link').map((a) => a.textContent))).toEqual(new Set(['Overview', 'Academics', 'Students', 'Teachers']));
+  });
+  it('accounts on a temporary password see only the change-password screen (no navigation)', async () => {
+    stub = { ...base, member: member({ role: 'TEACHER', mustChangePassword: true }), tenant: tenant() };
+    show();
+    expect(await screen.findByRole('heading', { name: 'Choose a new password' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'My classes' })).not.toBeInTheDocument();
   });
 });

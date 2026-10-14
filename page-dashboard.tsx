@@ -1,53 +1,33 @@
-import { useEffect, useState } from 'react';
-import { Link, Navigate } from 'react-router-dom';
-import { collection, doc, getDoc, getDocs, limit, orderBy, query } from 'firebase/firestore';
-import { firebase } from './lib-firebase';
+import { lazy, Suspense, type ReactNode } from 'react';
+import { Link, Navigate, NavLink, Route, Routes } from 'react-router-dom';
 import { useAuth } from './ctx-auth';
-import { Alert, Badge, Button, Card, Spinner, formatDate } from './ui';
-import { logTechnical } from './lib-errors';
-import { applyBranding, resetBranding } from './lib-theme';
-import type { PublicProfile } from './types';
+import { TenantProvider, useTenant } from './ctx-tenant';
+import { Alert, Badge, Button, Spinner } from './ui';
+import { can, navFor, type Permission } from './lib-permissions';
 
-/** Modules arrive phase by phase; shown disabled so nothing looks falsely functional. */
-const MODULES: { label: string; phase: number }[] = [
-  { label: 'Students', phase: 8 }, { label: 'Teachers', phase: 9 }, { label: 'Attendance', phase: 10 },
-  { label: 'Fees', phase: 11 }, { label: 'Assignments', phase: 12 }, { label: 'Exams', phase: 13 },
-  { label: 'Results', phase: 14 }, { label: 'Materials', phase: 15 }, { label: 'Notifications', phase: 16 },
-  { label: 'Analytics', phase: 17 },
+const Overview = lazy(() => import('./page-overview'));
+const Academics = lazy(() => import('./page-academics'));
+const Students = lazy(() => import('./page-students'));
+const Teachers = lazy(() => import('./page-teachers'));
+const Parents = lazy(() => import('./page-parents'));
+const Users = lazy(() => import('./page-users'));
+const Settings = lazy(() => import('./page-settings'));
+const ImportPage = lazy(() => import('./page-import'));
+const MyClasses = lazy(() => import('./page-myclasses'));
+const ChangePassword = lazy(() => import('./page-changepassword'));
+
+/** Modules that arrive in later phases; shown disabled so nothing looks falsely functional. */
+const SOON: { label: string; phase: number }[] = [
+  { label: 'Attendance', phase: 10 }, { label: 'Fees', phase: 11 }, { label: 'Assignments', phase: 12 },
+  { label: 'Exams', phase: 13 }, { label: 'Results', phase: 14 }, { label: 'Materials', phase: 15 },
+  { label: 'Notifications', phase: 16 }, { label: 'Analytics', phase: 17 },
 ];
 
 export default function Dashboard() {
   const auth = useAuth();
-  const [profile, setProfile] = useState<PublicProfile | null>(null);
-  const [classes, setClasses] = useState<string[] | null>(null);
-  const [subjects, setSubjects] = useState<string[] | null>(null);
-  const tenantId = auth.tenantId;
-  const active = auth.tenant?.status === 'ACTIVE'
-    && !(auth.tenant.expiresAt && auth.tenant.expiresAt.toDate().getTime() < Date.now());
-
-  useEffect(() => {
-    if (!tenantId || !auth.member) return;
-    let alive = true;
-    const { db } = firebase();
-    void getDoc(doc(db, `publicProfiles/${tenantId}`)).then((s) => {
-      if (!alive || !s.exists()) return;
-      const p = s.data() as PublicProfile;
-      setProfile(p);
-      applyBranding(p.primaryColor, p.secondaryColor);
-    }).catch((e) => logTechnical('profile', e));
-    if (active) {
-      const names = (col: string, set: (v: string[]) => void) =>
-        getDocs(query(collection(db, `tenants/${tenantId}/${col}`), orderBy('order'), limit(100)))
-          .then((s) => alive && set(s.docs.map((d) => String(d.get('name')))))
-          .catch((e) => { logTechnical(col, e); if (alive) set([]); });
-      void names('classes', setClasses);
-      void names('subjects', setSubjects);
-    }
-    return () => { alive = false; resetBranding(); };
-  }, [tenantId, auth.member, active]);
-
   if (auth.status === 'loading') return <main className="center"><Spinner /></main>;
-  if (!auth.user || !tenantId || !auth.member) return <Navigate to="/" replace />;
+  if (!auth.user || !auth.tenantId || !auth.member) return <Navigate to="/" replace />;
+
   if (auth.member.status !== 'ACTIVE') {
     return (
       <main className="center narrow">
@@ -71,7 +51,7 @@ export default function Dashboard() {
     );
   }
   const { tenant, member } = auth;
-
+  const active = tenant.status === 'ACTIVE' && !(tenant.expiresAt && tenant.expiresAt.toDate().getTime() < Date.now());
   if (!active) {
     return (
       <main className="center narrow">
@@ -84,7 +64,30 @@ export default function Dashboard() {
       </main>
     );
   }
+  if (member.mustChangePassword) {
+    return <Suspense fallback={<main className="center"><Spinner /></main>}><ChangePassword /></Suspense>;
+  }
+  return (
+    <TenantProvider tenantId={auth.tenantId} uid={auth.user.uid} tenant={tenant} member={member}>
+      <Shell />
+    </TenantProvider>
+  );
+}
 
+function Guard({ perm, children }: { perm: Permission; children: ReactNode }) {
+  const { member } = useTenant();
+  if (!can(member.role, perm)) return <Alert>You don't have permission to view this page.</Alert>;
+  return <>{children}</>;
+}
+
+function Shell() {
+  const auth = useAuth();
+  const { tenant, member, profile } = useTenant();
+  const items = navFor(member.role);
+  const link = (to: string, label: string) => (
+    <NavLink key={label} to={to === '' ? '/app' : `/app/${to}`} end={to === ''}>{label}</NavLink>
+  );
+  const showSoon = can(member.role, 'academics.manage');
   return (
     <div className="shell">
       <aside className="sidebar" aria-label="Main navigation">
@@ -93,53 +96,35 @@ export default function Dashboard() {
           <strong>{tenant.name}</strong>
         </div>
         <nav>
-          <a href="#/app" aria-current="page" className="on">Overview</a>
-          {MODULES.map((m) => (
+          {items.map((n) => link(n.to, n.label))}
+          {showSoon && SOON.map((m) => (
             <span key={m.label} className="soon" aria-disabled="true" title={`Planned: Phase ${m.phase}`}>{m.label}</span>
           ))}
         </nav>
       </aside>
       <div className="main">
         <header className="topbar">
-          <h1>Overview</h1>
-          <div className="row">
-            <span className="muted">{member.displayName || auth.user.email} · <Badge tone="muted">{member.role.replace('_', ' ')}</Badge></span>
-            <Button variant="secondary" onClick={() => void auth.signOut()}>Sign out</Button>
-          </div>
+          <span className="muted">{member.displayName || auth.user?.email} · <Badge tone="muted">{member.role.replace('_', ' ')}</Badge></span>
+          <Button variant="secondary" onClick={() => void auth.signOut()}>Sign out</Button>
         </header>
-        {!tenant.setupComplete && (
-          <Alert>School setup did not finish completely. Some classes, subjects or terms may be missing. They can be added once management screens ship in the next phases.</Alert>
-        )}
-        <div className="cards">
-          <Card title="License">
-            <dl className="summary">
-              <dt>Plan</dt><dd>{tenant.plan}</dd>
-              <dt>Status</dt><dd><Badge tone="ok">Active</Badge></dd>
-              <dt>Expires</dt><dd>{tenant.expiresAt ? formatDate(tenant.expiresAt) : 'Never'}</dd>
-            </dl>
-          </Card>
-          <Card title="Academic year">
-            <dl className="summary">
-              <dt>Session</dt><dd>{tenant.settings.academicSession}</dd>
-              <dt>Terms</dt><dd>{tenant.settings.terms.join(', ')}</dd>
-              <dt>Currency</dt><dd>{tenant.settings.currency}</dd>
-              <dt>Timezone</dt><dd>{tenant.settings.timezone}</dd>
-            </dl>
-          </Card>
-          <Card title="Classes">
-            {classes === null ? <Spinner /> : classes.length === 0 ? <p className="muted">None yet.</p>
-              : <ul className="chips">{classes.map((c) => <li key={c}>{c}</li>)}</ul>}
-          </Card>
-          <Card title="Subjects">
-            {subjects === null ? <Spinner /> : subjects.length === 0 ? <p className="muted">None yet.</p>
-              : <ul className="chips">{subjects.map((c) => <li key={c}>{c}</li>)}</ul>}
-          </Card>
-        </div>
+        <Suspense fallback={<Spinner />}>
+          <Routes>
+            <Route index element={<Overview />} />
+            <Route path="academics" element={<Guard perm="academics.manage"><Academics /></Guard>} />
+            <Route path="students" element={<Guard perm="students.read"><Students /></Guard>} />
+            <Route path="teachers" element={<Guard perm="teachers.read"><Teachers /></Guard>} />
+            <Route path="parents" element={<Guard perm="parents.manage"><Parents /></Guard>} />
+            <Route path="users" element={<Guard perm="users.manage"><Users /></Guard>} />
+            <Route path="import" element={<Guard perm="import.run"><ImportPage /></Guard>} />
+            <Route path="settings" element={<Guard perm="settings.manage"><Settings /></Guard>} />
+            <Route path="my-classes" element={<Guard perm="classes.viewAssigned"><MyClasses /></Guard>} />
+            <Route path="*" element={<Navigate to="/app" replace />} />
+          </Routes>
+        </Suspense>
         <footer className="foot muted">{tenant.profile.footer || tenant.name}</footer>
       </div>
       <nav className="bottomnav" aria-label="Mobile navigation">
-        <a href="#/app" className="on">Overview</a>
-        <span className="soon">More soon</span>
+        {items.map((n) => link(n.to, n.label))}
       </nav>
     </div>
   );

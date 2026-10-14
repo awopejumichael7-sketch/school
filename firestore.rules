@@ -38,6 +38,7 @@ service cloud.firestore {
       let tn = get(tenantPath(t)).data;
       return signedIn()
         && m.status == 'ACTIVE'
+        && m.get('mustChangePassword', false) == false   // temp-password accounts get no data access
         && m.role in roles
         && tn.status == 'ACTIVE'
         && (tn.get('expiresAt', null) == null || tn.expiresAt > request.time);
@@ -215,11 +216,13 @@ service cloud.firestore {
     // every real access check goes through members/{uid} under the tenant path.
     match /userDirectory/{u} {
       allow get: if signedIn() && request.auth.uid == u;
+      // Self (first admin, in the activation batch) or a school admin placing a NEW user into
+      // THEIR OWN school. Create-only: a user already placed in another school cannot be moved.
       allow create: if signedIn()
-        && request.auth.uid == u
         && request.resource.data.keys().hasOnly(['tenantId'])
         && request.resource.data.tenantId is string
-        && existsAfter(memberPath(request.resource.data.tenantId, u));
+        && existsAfter(memberPath(request.resource.data.tenantId, u))
+        && (request.auth.uid == u || hasRole(request.resource.data.tenantId, ['SCHOOL_ADMIN']));
       allow list, update, delete: if false;
     }
 
@@ -288,8 +291,14 @@ service cloud.firestore {
     match /tenants/{t}/members/{m} {
       allow get: if signedIn() && request.auth.uid == m;
       allow list: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL']);
-      // Only the tenant owner (license activator) can create their own admin membership.
-      allow create: if signedIn()
+      allow create: if ownerBootstrapMember(t, m) || adminCreatesMember(t, m);
+      allow update: if selfClearsPasswordFlag(m) || adminUpdatesMember(t, m);
+      allow delete: if false;
+    }
+
+    // The tenant owner (license activator) creates their own admin membership.
+    function ownerBootstrapMember(t, m) {
+      return signedIn()
         && request.auth.uid == m
         && getAfter(tenantPath(t)).data.ownerUid == request.auth.uid
         && request.resource.data.keys().hasOnly(['uid', 'tenantId', 'role', 'status', 'displayName', 'email'])
@@ -297,7 +306,48 @@ service cloud.firestore {
         && request.resource.data.tenantId == t
         && request.resource.data.role == 'SCHOOL_ADMIN'
         && request.resource.data.status == 'ACTIVE';
-      allow update, delete: if false;   // user management arrives in Phase 8/9
+    }
+
+    // A school admin creates staff/student/parent members. They start with mustChangePassword = true.
+    function adminCreatesMember(t, m) {
+      let d = request.resource.data;
+      return hasRole(t, ['SCHOOL_ADMIN'])
+        && request.auth.uid != m
+        && d.keys().hasOnly(['uid', 'tenantId', 'role', 'status', 'displayName', 'email', 'loginId',
+             'mustChangePassword', 'classIds', 'subjectIds'])
+        && d.keys().hasAll(['uid', 'tenantId', 'role', 'status', 'displayName', 'email', 'loginId', 'mustChangePassword'])
+        && d.uid == m
+        && d.tenantId == t
+        && d.role in ['SCHOOL_ADMIN', 'PRINCIPAL', 'TEACHER', 'STUDENT', 'PARENT', 'ACCOUNTANT', 'STAFF']
+        && d.status == 'ACTIVE'
+        && d.mustChangePassword == true
+        && d.displayName is string && d.displayName.size() >= 1 && d.displayName.size() <= 120
+        && d.email is string && d.email.size() <= 200
+        && d.loginId is string && d.loginId.size() >= 1 && d.loginId.size() <= 200
+        && (!('classIds' in d) || (d.classIds is list && d.classIds.size() <= 60))
+        && (!('subjectIds' in d) || (d.subjectIds is list && d.subjectIds.size() <= 60));
+    }
+
+    // The user replaced their temporary password; they may only flip this one flag, true -> false.
+    function selfClearsPasswordFlag(m) {
+      return signedIn()
+        && request.auth.uid == m
+        && resource.data.get('mustChangePassword', false) == true
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['mustChangePassword'])
+        && request.resource.data.mustChangePassword == false;
+    }
+
+    // Admins manage OTHER members (never themselves, so a school can't lock itself out by accident).
+    function adminUpdatesMember(t, m) {
+      let d = request.resource.data;
+      return hasRole(t, ['SCHOOL_ADMIN'])
+        && request.auth.uid != m
+        && d.diff(resource.data).affectedKeys().hasOnly(['status', 'role', 'displayName', 'classIds', 'subjectIds'])
+        && d.status in ['ACTIVE', 'DISABLED']
+        && d.role in ['SCHOOL_ADMIN', 'PRINCIPAL', 'TEACHER', 'STUDENT', 'PARENT', 'ACCOUNTANT', 'STAFF']
+        && d.displayName is string && d.displayName.size() >= 1 && d.displayName.size() <= 120
+        && (!('classIds' in d) || (d.classIds is list && d.classIds.size() <= 60))
+        && (!('subjectIds' in d) || (d.subjectIds is list && d.subjectIds.size() <= 60));
     }
 
     // ---------- school configuration collections ----------
@@ -327,6 +377,163 @@ service cloud.firestore {
         && request.resource.data.name is string
         && request.resource.data.name.size() >= 1
         && request.resource.data.name.size() <= 100;
+    }
+
+    // ---------- shared validators ----------
+    // Photos/logos are small inline images (Spark has no Cloud Storage).
+    function validPhoto(p) {
+      return p == null
+        || (p is string && p.size() <= 30000
+            && p.matches('^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$'));
+    }
+    function isoDate(v) {
+      return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    // ---------- teachers ----------
+    match /tenants/{t}/teachers/{id} {
+      allow get: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'STAFF'])
+                 || (hasRole(t, ['TEACHER']) && request.auth.uid == id);
+      allow list: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'STAFF']);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN']) && validTeacherCreate(t, id);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN']) && validTeacherUpdate();
+      allow delete: if false;   // deactivate instead
+    }
+    function validTeacherShape(d) {
+      return d.name is string && d.name.size() >= 2 && d.name.size() <= 120
+        && d.phone is string && d.phone.size() <= 20
+        && d.email is string && d.email.size() <= 200
+        && d.subjects is list && d.subjects.size() <= 60
+        && d.classes is list && d.classes.size() <= 60
+        && d.status in ['ACTIVE', 'INACTIVE']
+        && validPhoto(d.photo);
+    }
+    function validTeacherCreate(t, id) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['tenantId', 'teacherId', 'uid', 'name', 'photo', 'phone', 'email', 'loginId',
+               'subjects', 'classes', 'status', 'createdAt', 'createdBy'])
+        && d.keys().hasAll(['tenantId', 'teacherId', 'uid', 'name', 'photo', 'phone', 'email', 'loginId',
+               'subjects', 'classes', 'status', 'createdAt', 'createdBy'])
+        && d.tenantId == t
+        && d.uid == id
+        && d.teacherId is string && d.teacherId.size() <= 40
+        && d.loginId is string && d.loginId.size() <= 200
+        && d.status == 'ACTIVE'
+        && d.createdAt == request.time
+        && d.createdBy == request.auth.uid
+        && validTeacherShape(d);
+    }
+    function validTeacherUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['name', 'photo', 'phone', 'email', 'subjects', 'classes', 'status', 'updatedAt'])
+        && validTeacherShape(request.resource.data);
+    }
+
+    // ---------- students (document ID = admission number, so it is unique per school) ----------
+    match /tenants/{t}/students/{id} {
+      allow read: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'ACCOUNTANT', 'STAFF'])
+                  || (hasRole(t, ['TEACHER'])
+                      && resource.data.classId in get(memberPath(t, request.auth.uid)).data.get('classIds', []))
+                  || (hasRole(t, ['PARENT']) && request.auth.uid in resource.data.parentIds)
+                  || (hasRole(t, ['STUDENT']) && resource.data.get('uid', null) == request.auth.uid);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN']) && validStudentCreate(t, id);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN']) && validStudentUpdate();
+      allow delete: if false;   // deactivate instead
+    }
+    function validStudentShape(d) {
+      return d.firstName is string && d.firstName.size() >= 1 && d.firstName.size() <= 60
+        && d.middleName is string && d.middleName.size() <= 60
+        && d.lastName is string && d.lastName.size() >= 1 && d.lastName.size() <= 60
+        && d.gender in ['MALE', 'FEMALE']
+        && isoDate(d.dateOfBirth)
+        && isoDate(d.admissionDate)
+        && d.classId is string && d.classId.size() >= 1 && d.classId.size() <= 100
+        && d.parentIds is list && d.parentIds.size() <= 6
+        && d.phone is string && d.phone.size() <= 20
+        && d.email is string && d.email.size() <= 200
+        && d.address is string && d.address.size() <= 300
+        && d.status in ['ACTIVE', 'INACTIVE', 'GRADUATED', 'TRANSFERRED']
+        && d.academicSession is string && d.academicSession.size() <= 40
+        && (d.uid == null || d.uid is string)
+        && validPhoto(d.photo);
+    }
+    function validStudentCreate(t, id) {
+      let d = request.resource.data;
+      return id.matches('^[A-Za-z0-9-]{3,30}$')
+        && d.keys().hasOnly(['tenantId', 'studentId', 'admissionNumber', 'firstName', 'middleName', 'lastName',
+               'gender', 'dateOfBirth', 'photo', 'classId', 'parentIds', 'phone', 'email', 'address',
+               'admissionDate', 'status', 'academicSession', 'uid', 'createdAt', 'createdBy'])
+        && d.keys().hasAll(['tenantId', 'studentId', 'admissionNumber', 'firstName', 'middleName', 'lastName',
+               'gender', 'dateOfBirth', 'photo', 'classId', 'parentIds', 'phone', 'email', 'address',
+               'admissionDate', 'status', 'academicSession', 'uid', 'createdAt', 'createdBy'])
+        && d.tenantId == t
+        && d.studentId == id
+        && d.admissionNumber == id
+        && d.parentIds.size() == 0
+        && d.status == 'ACTIVE'
+        && d.createdAt == request.time
+        && d.createdBy == request.auth.uid
+        && validStudentShape(d);
+    }
+    function validStudentUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['firstName', 'middleName', 'lastName', 'gender', 'dateOfBirth', 'photo', 'classId',
+                         'parentIds', 'phone', 'email', 'address', 'admissionDate', 'status',
+                         'academicSession', 'uid', 'updatedAt'])
+        && validStudentShape(request.resource.data);
+    }
+
+    // ---------- parents ----------
+    match /tenants/{t}/parents/{id} {
+      allow get: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'STAFF'])
+                 || (hasRole(t, ['PARENT']) && request.auth.uid == id);
+      allow list: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'STAFF']);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN']) && validParentCreate(t, id);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN']) && validParentUpdate();
+      allow delete: if false;
+    }
+    function validParentShape(d) {
+      return d.name is string && d.name.size() >= 2 && d.name.size() <= 120
+        && d.phone is string && d.phone.size() <= 20
+        && d.email is string && d.email.size() <= 200
+        && d.childIds is list && d.childIds.size() <= 20
+        && d.status in ['ACTIVE', 'INACTIVE'];
+    }
+    function validParentCreate(t, id) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['tenantId', 'uid', 'name', 'phone', 'email', 'loginId', 'childIds', 'status',
+               'createdAt', 'createdBy'])
+        && d.keys().hasAll(['tenantId', 'uid', 'name', 'phone', 'email', 'loginId', 'childIds', 'status',
+               'createdAt', 'createdBy'])
+        && d.tenantId == t
+        && d.uid == id
+        && d.loginId is string && d.loginId.size() <= 200
+        && d.status == 'ACTIVE'
+        && d.createdAt == request.time
+        && d.createdBy == request.auth.uid
+        && validParentShape(d);
+    }
+    function validParentUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['name', 'phone', 'email', 'childIds', 'status', 'updatedAt'])
+        && validParentShape(request.resource.data);
+    }
+
+    // ---------- counters (admission-number sequences) ----------
+    match /tenants/{t}/counters/{name} {
+      allow read: if hasRole(t, ['SCHOOL_ADMIN']);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN'])
+        && name.matches('^[a-z0-9-]{1,40}$')
+        && request.resource.data.keys().hasOnly(['next'])
+        && request.resource.data.next is int
+        && request.resource.data.next >= 1 && request.resource.data.next <= 1000000;
+      // Only ever moves forward, by a bounded amount (no resetting to reuse numbers).
+      allow update: if hasRole(t, ['SCHOOL_ADMIN'])
+        && request.resource.data.keys().hasOnly(['next'])
+        && request.resource.data.next is int
+        && request.resource.data.next > resource.data.next
+        && request.resource.data.next <= resource.data.next + 501;
+      allow delete: if false;
     }
 
     // ---------- audit log: append-only, actor must be the caller ----------

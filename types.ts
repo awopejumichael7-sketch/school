@@ -43,6 +43,9 @@ export interface SchoolProfile {
 
 export interface SchoolSettings {
   academicSession: string;
+  /** Prefix for generated admission numbers, e.g. "SCA". Defaults from the school name. */
+  admissionPrefix?: string;
+  pastSessions?: string[];
   terms: string[];
   currency: string;
   timezone: string;
@@ -81,4 +84,63 @@ export interface MemberDoc {
   status: 'ACTIVE' | 'DISABLED';
   displayName: string;
   email: string;
+  /** Sign-in name for accounts without a real email (e.g. students). */
+  loginId?: string;
+  /** True until the user replaces the admin-issued temporary password. */
+  mustChangePassword?: boolean;
+  /** Teachers: classes/subjects they are assigned to (used by security rules). */
+  classIds?: string[];
+  subjectIds?: string[];
+}
+
+export type RecordStatus = 'ACTIVE' | 'INACTIVE';
+export type StudentStatus = 'ACTIVE' | 'INACTIVE' | 'GRADUATED' | 'TRANSFERRED';
+export type Gender = 'MALE' | 'FEMALE';
+
+export interface NamedItem { id: string; name: string; status?: string; order?: number }
+
+export interface StudentDoc {
+  tenantId: string;
+  studentId: string;
+  admissionNumber: string;
+  firstName: string;
+  middleName: string;
+  lastName: string;
+  gender: Gender;
+  dateOfBirth: string; // YYYY-MM-DD
+  photo: string | null;
+  classId: string;
+  parentIds: string[];
+  phone: string;
+  email: string;
+  address: string;
+  admissionDate: string; // YYYY-MM-DD
+  status: StudentStatus;
+  academicSession: string;
+  uid: string | null;
+}
+
+export interface TeacherDoc {
+  tenantId: string;
+  teacherId: string;
+  uid: string;
+  name: string;
+  photo: string | null;
+  phone: string;
+  email: string;
+  loginId: string;
+  subjects: string[];
+  classes: string[];
+  status: RecordStatus;
+}
+
+export interface ParentDoc {
+  tenantId: string;
+  uid: string;
+  name: string;
+  phone: string;
+  email: string;
+  loginId: string;
+  childIds: string[];
+  status: RecordStatus;
 }

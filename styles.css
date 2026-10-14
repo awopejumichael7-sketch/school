@@ -95,3 +95,21 @@ td.actions .btn { min-height: 36px; padding: 6px 10px; font-size: .85rem; }
   .bottomnav a.on { background: var(--primary); color: var(--on-primary); }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* ---- Phase 7-9 additions ---- */
+.sidebar a.active { background: var(--primary); color: var(--on-primary); }
+.bottomnav a.active { background: var(--primary); color: var(--on-primary); }
+@media (max-width: 760px) { .bottomnav { overflow-x: auto; justify-content: flex-start; } .bottomnav a { white-space: nowrap; } }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-bottom: 12px; }
+.toolbar .field { max-width: 240px; margin: 0; }
+.checks { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin: 0 0 12px; }
+.checks legend { font-weight: 600; font-size: .92rem; padding: 0 4px; }
+.checks label { display: inline-flex; align-items: center; gap: 6px; margin: 2px 12px 2px 0; font-weight: 400; }
+.checks input { width: auto; min-height: 0; }
+.photo { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border); }
+.cred { background: var(--bg); border: 1px dashed var(--primary); border-radius: 8px; padding: 12px; margin: 8px 0; user-select: all; }
+.errlist { margin: 4px 0 0; padding-left: 18px; color: var(--danger); font-size: .88rem; }
+.pill-row { display: flex; flex-wrap: wrap; gap: 4px; }
+ul.plain { list-style: none; padding: 0; margin: 0 0 8px; }
+ul.plain li { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.row.between { justify-content: space-between; align-items: center; margin-top: 0; }

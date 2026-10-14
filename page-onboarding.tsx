@@ -15,6 +15,7 @@ import {
 import { buildActivationPlan, buildReactivationPlan, type ActivationPlan } from './lib-activation';
 import { applyOps, newId } from './lib-ops';
 import { fileToLogoDataUrl } from './lib-image';
+import { AssessmentEditor, GradingEditor } from './ui-editors';
 import { applyBranding, DEFAULT_PRIMARY, DEFAULT_SECONDARY } from './lib-theme';
 import { logAudit } from './lib-audit';
 import type { AssessmentWeight, GradeBand, LicenseDoc, SchoolProfile } from './types';
@@ -420,33 +421,8 @@ export default function Onboarding() {
             <datalist id="currencies">{COMMON_CURRENCIES.map((c) => <option key={c} value={c} />)}</datalist>
             <datalist id="timezones">{timezones.map((z) => <option key={z} value={z} />)}</datalist>
 
-            <h3>Assessment weights</h3>
-            <p className="muted">Total must be 100.</p>
-            {assessment.map((a, i) => (
-              <div className="grid3" key={i}>
-                <Field label="Name" value={a.label} onChange={(e) => setAssessment(assessment.map((x, j) => j === i ? { ...x, label: e.target.value, key: slugify(e.target.value) || `a${i}` } : x))} />
-                <Field label="Weight %" type="number" min={0} max={100} step="any" value={a.weight}
-                  onChange={(e) => setAssessment(assessment.map((x, j) => j === i ? { ...x, weight: Number(e.target.value) } : x))} />
-                <Button type="button" variant="ghost" onClick={() => setAssessment(assessment.filter((_, j) => j !== i))} aria-label={`Remove ${a.label || 'assessment'}`}>Remove</Button>
-              </div>
-            ))}
-            <Button type="button" variant="secondary" onClick={() => setAssessment([...assessment, { key: `a${assessment.length}`, label: '', weight: 0 }])}>Add assessment</Button>
-
-            <h3>Grading bands</h3>
-            <p className="muted">Bands must cover 0-100 with no gaps or overlaps. Edit freely: nothing is tied to any country.</p>
-            {grading.map((b, i) => (
-              <div className="grid5" key={i}>
-                <Field label="From" type="number" step="any" value={b.min} onChange={(e) => setGrading(grading.map((x, j) => j === i ? { ...x, min: Number(e.target.value) } : x))} />
-                <Field label="To" type="number" step="any" value={b.max} onChange={(e) => setGrading(grading.map((x, j) => j === i ? { ...x, max: Number(e.target.value) } : x))} />
-                <Field label="Grade" value={b.grade} maxLength={4} onChange={(e) => setGrading(grading.map((x, j) => j === i ? { ...x, grade: e.target.value } : x))} />
-                <Field label="Remark" value={b.remark} onChange={(e) => setGrading(grading.map((x, j) => j === i ? { ...x, remark: e.target.value } : x))} />
-                <Button type="button" variant="ghost" onClick={() => setGrading(grading.filter((_, j) => j !== i))} aria-label={`Remove grade ${b.grade}`}>Remove</Button>
-              </div>
-            ))}
-            <div className="row">
-              <Button type="button" variant="secondary" onClick={() => setGrading([...grading, { min: 0, max: 0, grade: '', remark: '' }])}>Add band</Button>
-              <Button type="button" variant="ghost" onClick={() => setGrading(DEFAULT_GRADING)}>Reset to defaults</Button>
-            </div>
+            <AssessmentEditor value={assessment} onChange={setAssessment} />
+            <GradingEditor value={grading} onChange={setGrading} />
 
             <div className="row">
               <Button type="button" variant="secondary" onClick={() => setStep('school')}>Back</Button>
