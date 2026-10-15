@@ -21,7 +21,20 @@ describe('permissions', () => {
   });
   it('teachers cannot see admin screens or other schools\' management', () => {
     const labels = navFor('TEACHER').map((n) => n.label);
-    expect(labels).toEqual(['Overview', 'My classes']);
+    expect(labels).toEqual(['Overview', 'Attendance', 'My classes']);
+  });
+  it('attendance and fees permissions', () => {
+    expect(can('TEACHER', 'attendance.take')).toBe(true);
+    expect(can('SCHOOL_ADMIN', 'attendance.take')).toBe(true);
+    for (const r of ['PRINCIPAL', 'STAFF', 'ACCOUNTANT', 'STUDENT', 'PARENT'] as const) expect(can(r, 'attendance.take')).toBe(false);
+    expect(can('PRINCIPAL', 'attendance.read')).toBe(true);
+    expect(can('STAFF', 'attendance.read')).toBe(true);
+    expect(can('ACCOUNTANT', 'attendance.read')).toBe(false);
+    for (const r of ['SCHOOL_ADMIN', 'ACCOUNTANT'] as const) expect(can(r, 'fees.manage')).toBe(true);
+    for (const r of ['PRINCIPAL', 'TEACHER', 'STAFF', 'STUDENT', 'PARENT'] as const) expect(can(r, 'fees.manage')).toBe(false);
+    expect(can('PRINCIPAL', 'fees.read')).toBe(true);
+    for (const r of ['TEACHER', 'STAFF', 'STUDENT', 'PARENT'] as const) expect(can(r, 'fees.read')).toBe(false);
+    expect(navFor('ACCOUNTANT').map((n) => n.label)).toEqual(['Overview', 'Students', 'Fees']);
   });
   it('students and parents only get the overview for now', () => {
     expect(navFor('STUDENT').map((n) => n.label)).toEqual(['Overview']);

@@ -6,19 +6,21 @@ import type { Role } from './types';
  */
 export type Permission =
   | 'academics.manage' | 'students.read' | 'students.write' | 'teachers.read' | 'teachers.manage'
-  | 'parents.manage' | 'users.manage' | 'settings.manage' | 'import.run' | 'classes.viewAssigned';
+  | 'parents.manage' | 'users.manage' | 'settings.manage' | 'import.run' | 'classes.viewAssigned'
+  | 'attendance.read' | 'attendance.take' | 'fees.read' | 'fees.manage';
 
 const ADMIN: Permission[] = [
   'academics.manage', 'students.read', 'students.write', 'teachers.read', 'teachers.manage',
   'parents.manage', 'users.manage', 'settings.manage', 'import.run',
+  'attendance.read', 'attendance.take', 'fees.read', 'fees.manage',
 ];
 
 export const PERMISSIONS: Record<Role, Permission[]> = {
   SCHOOL_ADMIN: ADMIN,
-  PRINCIPAL: ['academics.manage', 'students.read', 'teachers.read'],
-  TEACHER: ['classes.viewAssigned'],
-  ACCOUNTANT: ['students.read'],
-  STAFF: ['students.read', 'teachers.read'],
+  PRINCIPAL: ['academics.manage', 'students.read', 'teachers.read', 'attendance.read', 'fees.read'],
+  TEACHER: ['classes.viewAssigned', 'attendance.read', 'attendance.take'],
+  ACCOUNTANT: ['students.read', 'fees.read', 'fees.manage'],
+  STAFF: ['students.read', 'teachers.read', 'attendance.read'],
   STUDENT: [],
   PARENT: [],
 };
@@ -36,6 +38,8 @@ export const NAV: NavItem[] = [
   { to: 'students', label: 'Students', perm: 'students.read' },
   { to: 'teachers', label: 'Teachers', perm: 'teachers.read' },
   { to: 'parents', label: 'Parents', perm: 'parents.manage' },
+  { to: 'attendance', label: 'Attendance', perm: 'attendance.read' },
+  { to: 'fees', label: 'Fees', perm: 'fees.read' },
   { to: 'my-classes', label: 'My classes', perm: 'classes.viewAssigned' },
   { to: 'users', label: 'Users', perm: 'users.manage' },
   { to: 'import', label: 'Import', perm: 'import.run' },

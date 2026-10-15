@@ -36,6 +36,8 @@ function SettingsForm({ profile: pub }: { profile: PublicProfile }) {
   const [timezone, setTimezone] = useState(tenant.settings.timezone);
   const [grading, setGrading] = useState<GradeBand[]>(tenant.settings.grading);
   const [assessment, setAssessment] = useState<AssessmentWeight[]>(tenant.settings.assessment);
+  const [lateCounts, setLateCounts] = useState(tenant.settings.attendance?.lateCountsAsPresent ?? true);
+  const [excusedCounts, setExcusedCounts] = useState(tenant.settings.attendance?.excusedCountsAsAbsent ?? false);
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -63,6 +65,7 @@ function SettingsForm({ profile: pub }: { profile: PublicProfile }) {
           settings: {
             academicSession: session.trim(), admissionPrefix: prefix, pastSessions: [...past].slice(-20),
             terms: termNames.length ? termNames : tenant.settings.terms, currency, timezone: timezone.trim(), grading, assessment,
+            attendance: { lateCountsAsPresent: lateCounts, excusedCountsAsAbsent: excusedCounts },
           },
           updatedAt: serverTimestamp(),
         } },
@@ -118,6 +121,11 @@ function SettingsForm({ profile: pub }: { profile: PublicProfile }) {
             <Field label="Currency (3-letter code)" value={currency} maxLength={3} onChange={(e) => setCurrency(e.target.value.toUpperCase())} />
             <Field label="Timezone" value={timezone} onChange={(e) => setTimezone(e.target.value)} />
           </div>
+          <fieldset className="checks">
+            <legend>How attendance percentages are calculated</legend>
+            <label><input type="checkbox" checked={lateCounts} onChange={(e) => setLateCounts(e.target.checked)} /> A late student counts as attended</label>
+            <label><input type="checkbox" checked={excusedCounts} onChange={(e) => setExcusedCounts(e.target.checked)} /> An excused absence counts against the student</label>
+          </fieldset>
           <AssessmentEditor value={assessment} onChange={setAssessment} />
           <GradingEditor value={grading} onChange={setGrading} />
         </Card>

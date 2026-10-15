@@ -14,11 +14,13 @@ const Users = lazy(() => import('./page-users'));
 const Settings = lazy(() => import('./page-settings'));
 const ImportPage = lazy(() => import('./page-import'));
 const MyClasses = lazy(() => import('./page-myclasses'));
+const Attendance = lazy(() => import('./page-attendance'));
+const Fees = lazy(() => import('./page-fees'));
 const ChangePassword = lazy(() => import('./page-changepassword'));
 
 /** Modules that arrive in later phases; shown disabled so nothing looks falsely functional. */
 const SOON: { label: string; phase: number }[] = [
-  { label: 'Attendance', phase: 10 }, { label: 'Fees', phase: 11 }, { label: 'Assignments', phase: 12 },
+  { label: 'Assignments', phase: 12 },
   { label: 'Exams', phase: 13 }, { label: 'Results', phase: 14 }, { label: 'Materials', phase: 15 },
   { label: 'Notifications', phase: 16 }, { label: 'Analytics', phase: 17 },
 ];
@@ -114,6 +116,8 @@ function Shell() {
             <Route path="students" element={<Guard perm="students.read"><Students /></Guard>} />
             <Route path="teachers" element={<Guard perm="teachers.read"><Teachers /></Guard>} />
             <Route path="parents" element={<Guard perm="parents.manage"><Parents /></Guard>} />
+            <Route path="attendance" element={<Guard perm="attendance.read"><Attendance /></Guard>} />
+            <Route path="fees" element={<Guard perm="fees.read"><Fees /></Guard>} />
             <Route path="users" element={<Guard perm="users.manage"><Users /></Guard>} />
             <Route path="import" element={<Guard perm="import.run"><ImportPage /></Guard>} />
             <Route path="settings" element={<Guard perm="settings.manage"><Settings /></Guard>} />

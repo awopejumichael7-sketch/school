@@ -8,6 +8,7 @@ import { applyOps, newId, type Op } from './lib-ops';
 import { auditOp } from './lib-accounts';
 import { slugify } from './lib-config';
 import { can } from './lib-permissions';
+import { isValidIsoDate } from './lib-people';
 import type { NamedItem } from './types';
 
 type Kind = 'classes' | 'subjects' | 'terms';
@@ -34,6 +35,9 @@ function NameList({ kind, title, items, canEdit }: { kind: Kind; title: string; 
   const [name, setName] = useState('');
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
+  const [dating, setDating] = useState<string | null>(null);
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const base = `tenants/${tenantId}/${kind}`;
   const exists = (n: string, exceptId?: string) => items.some((i) => i.id !== exceptId && i.name.toLowerCase() === n.toLowerCase());
 
@@ -67,6 +71,16 @@ function NameList({ kind, title, items, canEdit }: { kind: Kind; title: string; 
     if (ok) setEditing(null);
   }
 
+  /** Term dates drive the 'term' attendance report. */
+  async function saveDates(id: string) {
+    if (from && !isValidIsoDate(from)) return setError('Enter a valid start date.');
+    if (to && !isValidIsoDate(to)) return setError('Enter a valid end date.');
+    if ((from && !to) || (!from && to)) return setError('Enter both the start and the end date.');
+    if (from && to && to < from) return setError('The end date cannot be before the start date.');
+    const ok = await run('termDates', async () => { await save([{ kind: 'update', path: `${base}/${id}`, data: { startDate: from, endDate: to, updatedAt: serverTimestamp() } }], 'terms.dates_set', `${base}/${id}`); return true; });
+    if (ok) setDating(null);
+  }
+
   async function setStatus(id: string, status: 'ACTIVE' | 'ARCHIVED') {
     await run(`status ${kind}`, () => save([{ kind: 'update', path: `${base}/${id}`, data: { status, updatedAt: serverTimestamp() } }], `${kind}.${status === 'ARCHIVED' ? 'archived' : 'restored'}`, `${base}/${id}`));
   }
@@ -84,11 +98,20 @@ function NameList({ kind, title, items, canEdit }: { kind: Kind; title: string; 
                 <Button busy={busy} onClick={() => void rename(i.id)}>Save</Button>
                 <Button variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
               </>
+            ) : dating === i.id ? (
+              <>
+                <Field label={`Start date for ${i.name}`} type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+                <Field label={`End date for ${i.name}`} type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+                <Button busy={busy} onClick={() => void saveDates(i.id)}>Save dates</Button>
+                <Button variant="ghost" onClick={() => setDating(null)}>Cancel</Button>
+              </>
             ) : (
               <>
-                <span>{i.name} {!isActiveItem(i) && <Badge tone="muted">archived</Badge>}</span>
+                <span>{i.name} {!isActiveItem(i) && <Badge tone="muted">archived</Badge>}
+                  {kind === 'terms' && <small className="muted"> {i.startDate && i.endDate ? `${i.startDate} to ${i.endDate}` : 'no dates set'}</small>}</span>
                 {canEdit && (
                   <span className="row">
+                    {kind === 'terms' && <Button variant="ghost" onClick={() => { setDating(i.id); setFrom(i.startDate ?? ''); setTo(i.endDate ?? ''); setError(null); }} aria-label={`Set dates for ${i.name}`}>Dates</Button>}
                     <Button variant="ghost" onClick={() => { setEditing(i.id); setEditName(i.name); setError(null); }} aria-label={`Rename ${i.name}`}>Rename</Button>
                     {isActiveItem(i)
                       ? <Button variant="ghost" busy={busy} onClick={() => void setStatus(i.id, 'ARCHIVED')} aria-label={`Archive ${i.name}`}>Archive</Button>

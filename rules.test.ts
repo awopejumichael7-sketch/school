@@ -14,6 +14,8 @@ import { buildActivationPlan, buildReactivationPlan, type ActivationInput } from
 import { planLicenseAction } from './lib-licenseAdmin';
 import { DEFAULT_ASSESSMENT, DEFAULT_GRADING } from './lib-config';
 import { buildMemberOps } from './lib-accounts';
+import { buildAttendanceCreate, buildAttendanceUpdate, type Status } from './lib-attendance';
+import { buildFeeDoc, buildFeeItemDoc, planPayment, planReversal, type FeeRef } from './lib-fees';
 import { buildStudentDoc, buildTeacherDoc, buildParentDoc, buildStudentUpdate, type StudentInput } from './lib-people';
 
 const H = 'a'.repeat(64);
@@ -384,5 +386,151 @@ describe('students, teachers, parents', () => {
     await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantA/counters/students-2026'), { next: 5000 }));
     await assertFails(setDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/counters/students-2026'), { next: 9 }));
     await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantB/counters/students-2026'), { next: 2 }));
+  });
+});
+
+
+// ============================================================ Phases 10-11: attendance and fees
+describe('attendance rules', () => {
+  const rec = (n = 2): Record<string, Status> => Object.fromEntries(Array.from({ length: n }, (_, i) => [`S${i}`, 'P' as Status]));
+  const names = { S0: 'A', S1: 'B' };
+  const att = (t: string, classId: string, uid: string, date = '2026-10-14', records: Record<string, Status> = rec()) =>
+    buildAttendanceCreate({ tenantId: t, classId, date, session: '2026', records, names, takenBy: uid, takenByName: 'T' });
+  const path = (t: string, classId: string, date = '2026-10-14') => `tenants/${t}/attendance/${classId}_${date}`;
+  beforeEach(async () => {
+    await seedTenant('tenantA', 'adminA'); await seedTenant('tenantB', 'adminB');
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore() as unknown as Firestore;
+      await updateDoc(doc(db, 'tenants/tenantA/members/teach-tenantA'), { classIds: ['c1'] });
+      await setDoc(doc(db, 'tenants/tenantA/members/princ'), { uid: 'princ', tenantId: 'tenantA', role: 'PRINCIPAL', status: 'ACTIVE' });
+      await setDoc(doc(db, 'tenants/tenantA/members/staff'), { uid: 'staff', tenantId: 'tenantA', role: 'STAFF', status: 'ACTIVE' });
+    });
+  });
+
+  it('an assigned teacher records their own class; other classes are refused; admin may record any', async () => {
+    await assertSucceeds(setDoc(doc(fs('teach-tenantA'), path('tenantA', 'c1')), att('tenantA', 'c1', 'teach-tenantA')));
+    await assertFails(setDoc(doc(fs('teach-tenantA'), path('tenantA', 'c2')), att('tenantA', 'c2', 'teach-tenantA')));
+    await assertSucceeds(setDoc(doc(fs('adminA'), path('tenantA', 'c2')), att('tenantA', 'c2', 'adminA')));
+    await assertFails(setDoc(doc(fs('princ'), path('tenantA', 'c3')), att('tenantA', 'c3', 'princ')));
+    await assertFails(setDoc(doc(fs('stud-tenantA'), path('tenantA', 'c1', '2026-10-15')), att('tenantA', 'c1', 'stud-tenantA', '2026-10-15')));
+    await assertFails(setDoc(doc(fs('adminA'), path('tenantB', 'c1')), att('tenantB', 'c1', 'adminA')));
+  });
+  it('malformed documents are refused: wrong id, month, status value, counts, forged author', async () => {
+    const good = att('tenantA', 'c1', 'adminA');
+    await assertFails(setDoc(doc(fs('adminA'), 'tenants/tenantA/attendance/wrong-id'), good));
+    await assertFails(setDoc(doc(fs('adminA'), path('tenantA', 'c1')), { ...good, month: '2026-09' }));
+    await assertFails(setDoc(doc(fs('adminA'), path('tenantA', 'c1')), { ...good, records: { S0: 'X', S1: 'P' } }));
+    await assertFails(setDoc(doc(fs('adminA'), path('tenantA', 'c1')), { ...good, counts: { P: 5, A: 0, L: 0, E: 0 } }));
+    await assertFails(setDoc(doc(fs('adminA'), path('tenantA', 'c1')), { ...good, total: 9 }));
+    await assertFails(setDoc(doc(fs('adminA'), path('tenantA', 'c1')), { ...good, takenBy: 'someone-else' }));
+    await assertSucceeds(setDoc(doc(fs('adminA'), path('tenantA', 'c1')), good));
+  });
+  it('updates may change marks only; class and date are fixed; wrong-class teachers are refused', async () => {
+    await assertSucceeds(setDoc(doc(fs('adminA'), path('tenantA', 'c1')), att('tenantA', 'c1', 'adminA')));
+    await assertSucceeds(updateDoc(doc(fs('teach-tenantA'), path('tenantA', 'c1')), buildAttendanceUpdate({ records: { S0: 'A', S1: 'P' }, names, updatedBy: 'teach-tenantA' })));
+    await assertFails(updateDoc(doc(fs('teach-tenantA'), path('tenantA', 'c1')), { ...buildAttendanceUpdate({ records: rec(), names, updatedBy: 'teach-tenantA' }), classId: 'c2' }));
+    await assertFails(updateDoc(doc(fs('teach-tenantA'), path('tenantA', 'c1')), { ...buildAttendanceUpdate({ records: rec(), names, updatedBy: 'teach-tenantA' }), date: '2026-10-01' }));
+    await assertFails(updateDoc(doc(fs('teach-tenantA'), path('tenantA', 'c1')), { ...buildAttendanceUpdate({ records: rec(), names, updatedBy: 'teach-tenantA' }), total: 99 }));
+    await assertFails(updateDoc(doc(fs('adminA'), path('tenantA', 'c1')), buildAttendanceUpdate({ records: rec(), names, updatedBy: 'forged' })));
+    await assertSucceeds(setDoc(doc(fs('adminA'), path('tenantA', 'c2')), att('tenantA', 'c2', 'adminA')));
+    await assertFails(updateDoc(doc(fs('teach-tenantA'), path('tenantA', 'c2')), buildAttendanceUpdate({ records: rec(), names, updatedBy: 'teach-tenantA' })));
+    await assertFails(deleteDoc(doc(fs('adminA'), path('tenantA', 'c1'))));
+  });
+  it('reading: teachers only their classes; principal and staff all; students/parents/other schools/owner none', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore() as unknown as Firestore;
+      await setDoc(doc(db, path('tenantA', 'c1')), { ...att('tenantA', 'c1', 'x'), createdAt: new Date() });
+      await setDoc(doc(db, path('tenantA', 'c2')), { ...att('tenantA', 'c2', 'x'), createdAt: new Date() });
+    });
+    const col = (u: string, t = 'tenantA') => collection(fs(u), `tenants/${t}/attendance`);
+    await assertSucceeds(getDocs(query(col('teach-tenantA'), where('classId', '==', 'c1'), where('month', '==', '2026-10'))));
+    await assertFails(getDocs(query(col('teach-tenantA'), where('classId', '==', 'c2'))));
+    await assertFails(getDocs(col('teach-tenantA')));
+    await assertSucceeds(getDocs(query(col('adminA'), where('date', '==', '2026-10-14'))));
+    await assertSucceeds(getDocs(col('princ'))); await assertSucceeds(getDocs(col('staff')));
+    await assertFails(getDocs(col('stud-tenantA'))); await assertFails(getDocs(col('owner1'))); await assertFails(getDocs(col('adminB')));
+  });
+});
+
+describe('fee and payment rules', () => {
+  const rawFee = (over: Record<string, unknown> = {}) => ({
+    tenantId: 'tenantA', studentId: 'S1', studentName: 'A', classId: 'c1', itemId: null, description: 'Tuition', category: 'TUITION',
+    amount: 1000, amountPaid: 0, balance: 1000, status: 'UNPAID', session: '2026', termId: '', dueDate: '', createdBy: 'x', createdAt: new Date(), ...over,
+  });
+  const ref = (over: Partial<FeeRef> = {}): FeeRef => ({ id: 'f1', amount: 1000, amountPaid: 0, studentId: 'S1', studentName: 'A', classId: 'c1', description: 'Tuition', ...over });
+  const who = { tenantId: 'tenantA', uid: 'acct', name: 'Acct' };
+  const payIn = (amount: number, n = 1) => ({ amount, date: '2026-10-14', method: 'CASH', reference: '', note: '', receiptNumber: `RCPT-2026-${String(n).padStart(6, '0')}` });
+  beforeEach(async () => {
+    await seedTenant('tenantA', 'adminA'); await seedTenant('tenantB', 'adminB');
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore() as unknown as Firestore;
+      for (const [u, role] of [['acct', 'ACCOUNTANT'], ['princ', 'PRINCIPAL']] as const) {
+        await setDoc(doc(db, `tenants/tenantA/members/${u}`), { uid: u, tenantId: 'tenantA', role, status: 'ACTIVE' });
+      }
+      await setDoc(doc(db, 'tenants/tenantB/members/acctB'), { uid: 'acctB', tenantId: 'tenantB', role: 'ACCOUNTANT', status: 'ACTIVE' });
+      await setDoc(doc(db, 'tenants/tenantA/fees/f1'), rawFee());
+      await setDoc(doc(db, 'tenants/tenantA/fees/cancelled'), rawFee({ status: 'CANCELLED' }));
+    });
+  });
+
+  it('who may touch fee items', async () => {
+    const item = buildFeeItemDoc({ name: 'T', category: 'TUITION', amount: 1000, classIds: ['c1'], termId: '', session: '2026' }, { tenantId: 'tenantA', createdBy: 'acct' });
+    await assertSucceeds(setDoc(doc(fs('acct'), 'tenants/tenantA/feeItems/i1'), item));
+    await assertFails(setDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/feeItems/i2'), { ...item, createdBy: 'teach-tenantA' }));
+    await assertFails(setDoc(doc(fs('princ'), 'tenants/tenantA/feeItems/i3'), { ...item, createdBy: 'princ' }));
+    await assertSucceeds(getDoc(doc(fs('princ'), 'tenants/tenantA/feeItems/i1')));
+    await assertFails(getDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/feeItems/i1')));
+    await assertFails(setDoc(doc(fs('acct'), 'tenants/tenantA/feeItems/i4'), { ...item, amount: 12.5 }));
+  });
+  it('a new fee must start unpaid with balance == amount and a whole-number amount', async () => {
+    const ok = buildFeeDoc({ tenantId: 'tenantA', studentId: 'S2', studentName: 'B', classId: 'c1', itemId: null, description: 'Uniform', category: 'UNIFORM', amount: 500, session: '2026', termId: '', dueDate: '', createdBy: 'acct' });
+    await assertSucceeds(setDoc(doc(fs('acct'), 'tenants/tenantA/fees/f2'), ok));
+    for (const bad of [{ amountPaid: 100, balance: 400 }, { status: 'PAID' }, { amount: -5, balance: -5 }, { amount: 10.5, balance: 10.5 }, { balance: 1 }, { category: 'LOANS' }]) {
+      await assertFails(setDoc(doc(fs('acct'), 'tenants/tenantA/fees/fbad'), { ...ok, ...bad }));
+    }
+    await assertFails(setDoc(doc(fs('acct'), 'tenants/tenantB/fees/f9'), { ...ok, tenantId: 'tenantB' }));
+    await assertFails(setDoc(doc(fs('teach-tenantA'), 'tenants/tenantA/fees/f3'), { ...ok, createdBy: 'teach-tenantA' }));
+  });
+  it('a payment must move the fee by exactly its amount, in the same batch', async () => {
+    await assertSucceeds(applyOps(fs('acct'), planPayment(ref(), payIn(400), who).ops));
+    await assertFails(applyOps(fs('acct'), planPayment(ref({ amountPaid: 400 }), payIn(700, 2), who).ops));              // overpayment
+    const [pay] = planPayment(ref({ amountPaid: 400 }), payIn(100, 3), who).ops;
+    await assertFails(applyOps(fs('acct'), [pay!]));                                                                       // receipt without balance change
+    const [, upd] = planPayment(ref({ amountPaid: 400 }), payIn(100, 4), who).ops;
+    await assertFails(applyOps(fs('acct'), [{ ...pay!, path: pay!.path.replace('000003', '000004') }, { ...upd!, data: { ...upd!.data, amountPaid: 999, balance: 1 } }]));   // mismatch
+    await assertFails(applyOps(fs('acct'), [{ kind: 'update', path: 'tenants/tenantA/fees/f1', data: { amountPaid: 500, balance: 123, status: 'PARTIAL', updatedAt: serverTimestamp() } }]));  // inconsistent books
+    await assertFails(applyOps(fs('acct'), planPayment({ ...ref(), id: 'cancelled' }, payIn(100, 5), who).ops));          // cancelled fee
+  });
+  it('a payment record cannot be edited, deleted or forged; only the reversed flag, with a matching reversal', async () => {
+    await applyOps(fs('acct'), planPayment(ref(), payIn(400), who).ops);
+    const p = 'tenants/tenantA/payments/RCPT-2026-000001';
+    await assertFails(updateDoc(doc(fs('acct'), p), { amount: 1 }));
+    await assertFails(deleteDoc(doc(fs('adminA'), p)));
+    await assertFails(updateDoc(doc(fs('acct'), p), { reversed: true, reversedBy: 'REV-2026-000009' }));                  // no reversal written
+    await assertFails(applyOps(fs('acct'), planPayment(ref({ amountPaid: 400 }), { ...payIn(100, 2), receiptNumber: 'FORGED-1' }, who).ops));
+  });
+  it('reversal: puts the money back once, never twice', async () => {
+    await applyOps(fs('acct'), planPayment(ref(), payIn(400), who).ops);
+    const original = { id: 'RCPT-2026-000001', feeId: 'f1', amount: 400, kind: 'PAYMENT', reversed: false, method: 'CASH' };
+    await assertSucceeds(applyOps(fs('acct'), planReversal(original, ref({ amountPaid: 400 }), 'REV-2026-000002', 'Mistake', '2026-10-14', who).ops));
+    await assertFails(applyOps(fs('acct'), planReversal(original, ref({ amountPaid: 0 }), 'REV-2026-000003', 'Again', '2026-10-14', who).ops));
+    await assertFails(applyOps(fs('acct'), planReversal({ ...original, amount: 300 }, ref({ amountPaid: 400 }), 'REV-2026-000004', 'x', '2026-10-14', who).ops));
+  });
+  it('who can read money records; other schools and the owner never', async () => {
+    await applyOps(fs('acct'), planPayment(ref(), payIn(400), who).ops);
+    for (const [u, ok] of [['acct', true], ['adminA', true], ['princ', true], ['teach-tenantA', false], ['stud-tenantA', false], ['acctB', false], ['owner1', false]] as const) {
+      const t = ok ? assertSucceeds : assertFails;
+      await t(getDoc(doc(fs(u), 'tenants/tenantA/fees/f1')));
+      await t(getDoc(doc(fs(u), 'tenants/tenantA/payments/RCPT-2026-000001')));
+    }
+    await assertFails(applyOps(fs('princ'), planPayment(ref({ amountPaid: 400 }), payIn(100, 2), { ...who, uid: 'princ' }).ops));
+    await assertFails(applyOps(fs('teach-tenantA'), planPayment(ref({ amountPaid: 400 }), payIn(100, 3), { ...who, uid: 'teach-tenantA' }).ops));
+  });
+  it('the receipt counter is usable by accountants only for receipts, and only moves forward', async () => {
+    await assertSucceeds(setDoc(doc(fs('acct'), 'tenants/tenantA/counters/receipts-2026'), { next: 2 }));
+    await assertSucceeds(setDoc(doc(fs('acct'), 'tenants/tenantA/counters/receipts-2026'), { next: 3 }));
+    await assertFails(setDoc(doc(fs('acct'), 'tenants/tenantA/counters/receipts-2026'), { next: 1 }));
+    await assertFails(setDoc(doc(fs('acct'), 'tenants/tenantA/counters/students-2026'), { next: 2 }));
+    await assertFails(setDoc(doc(fs('acctB'), 'tenants/tenantA/counters/receipts-2026'), { next: 9 }));
   });
 });

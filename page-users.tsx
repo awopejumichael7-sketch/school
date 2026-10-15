@@ -3,15 +3,19 @@ import { collection, getDocs, limit, orderBy, query, startAfter, type DocumentDa
 import { sendPasswordResetEmail } from 'firebase/auth';
 import { firebase } from './lib-firebase';
 import { useTenant } from './ctx-tenant';
-import { Alert, Badge, Button, Card, Select, Spinner } from './ui';
+import { Alert, Badge, Button, Card, Field, Select, Spinner } from './ui';
+import { Credentials, type Cred } from './ui-editors';
 import { useAction } from './use-action';
 import { applyOps, newId } from './lib-ops';
-import { auditOp, isSyntheticEmail } from './lib-accounts';
+import { auditOp, buildMemberOps, generatePassword, isSyntheticEmail } from './lib-accounts';
+import { withNewAccount } from './lib-newuser';
+import { looksLikeEmail } from './lib-people';
 import { friendlyError, logTechnical } from './lib-errors';
 import type { MemberDoc, Role } from './types';
 
 const ROLES: Role[] = ['SCHOOL_ADMIN', 'PRINCIPAL', 'TEACHER', 'STUDENT', 'PARENT', 'ACCOUNTANT', 'STAFF'];
 const PAGE = 50;
+const STAFF_ROLES: Role[] = ['ACCOUNTANT', 'PRINCIPAL', 'STAFF', 'SCHOOL_ADMIN'];
 
 export default function Users() {
   const { tenantId, uid } = useTenant();
@@ -21,6 +25,8 @@ export default function Users() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [creds, setCreds] = useState<Cred[] | null>(null);
   const { busy, error, run } = useAction();
 
   const load = useCallback(async (after: QueryDocumentSnapshot<DocumentData> | null) => {
@@ -54,6 +60,12 @@ export default function Users() {
   return (
     <>
       <h1>Users</h1>
+      {creds && <Credentials creds={creds} onClose={() => setCreds(null)} />}
+      {adding ? (
+        <AddUser onCancel={() => setAdding(false)} onCreated={(c) => { setAdding(false); setCreds([c]); void load(null); }} />
+      ) : (
+        <p><Button onClick={() => { setNotice(null); setAdding(true); }}>Add staff user</Button></p>
+      )}
       <p className="muted">Everyone who can sign in to this school. You cannot change your own role or status, so the school can never lock itself out.</p>
       {(error || loadError) && <Alert>{error ?? loadError}</Alert>}
       {notice && <Alert kind="success">{notice}</Alert>}
@@ -94,5 +106,52 @@ export default function Users() {
       </Card>
       <p className="muted">Password resets by email only work for people with a real email address. For username-only accounts (students), create a new account if a password is lost.</p>
     </>
+  );
+}
+
+/** Accountants, principals, other staff and extra administrators. (Teachers, parents and students have their own screens.) */
+function AddUser({ onCancel, onCreated }: { onCancel: () => void; onCreated: (c: Cred) => void }) {
+  const { tenantId, uid } = useTenant();
+  const { busy, error, setError, run } = useAction();
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState<Role>('ACCOUNTANT');
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const n = name.replace(/\s+/g, ' ').trim();
+    if (n.length < 2) return setError('Enter the full name.');
+    if (!looksLikeEmail(email.trim())) return setError('Enter a valid email address (it is their sign-in).');
+    const loginEmail = email.trim();
+    const cred = await run('addUser', async () => {
+      const password = generatePassword();
+      await withNewAccount(loginEmail, password, async (newUid) => {
+        await applyOps(firebase().db, [
+          ...buildMemberOps({ tenantId, uid: newUid, role, displayName: n, email: loginEmail, loginId: loginEmail }),
+          auditOp(tenantId, uid, newId(), 'user.created', `members/${newUid}`, { role }),
+        ]);
+      });
+      return { name: n, loginId: loginEmail, password };
+    });
+    if (cred) onCreated(cred);
+  }
+  return (
+    <Card title="Add staff user">
+      <form onSubmit={submit} noValidate>
+        {error && <Alert>{error}</Alert>}
+        <div className="grid3">
+          <Field label="Full name" value={name} onChange={(e) => setName(e.target.value)} required />
+          <Field label="Email (their sign-in)" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          <Select label="Role" value={role} onChange={(e) => setRole(e.target.value as Role)}>
+            {STAFF_ROLES.map((r) => <option key={r} value={r}>{r.replace('_', ' ')}</option>)}
+          </Select>
+        </div>
+        <p className="muted">A temporary password is generated and shown once. They must choose their own on first sign-in.</p>
+        <div className="row">
+          <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>Cancel</Button>
+          <Button type="submit" busy={busy}>Create user</Button>
+        </div>
+      </form>
+    </Card>
   );
 }

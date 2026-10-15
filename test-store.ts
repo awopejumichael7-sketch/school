@@ -75,9 +75,10 @@ export async function withNewAccountFake<T>(email: string, password: string, run
   try { return await run(uid); } catch (e) { accounts.pop(); throw e; }
 }
 
+let firestoreMockSelf: object = {};
 export function firestoreMock(real: typeof import('firebase/firestore')) {
   realTimestamp = real.Timestamp;
-  return {
+  const mock = {
     ...real,
     doc: (_d: unknown, path: string) => ({ path, id: path.split('/').pop() }),
     collection: (_d: unknown, path: string) => ({ __col: path, cs: [] as unknown[] }),
@@ -111,11 +112,21 @@ export function firestoreMock(real: typeof import('firebase/firestore')) {
       if (lim) docs = docs.slice(0, lim.n as number);
       return { docs, empty: docs.length === 0, size: docs.length };
     },
+    sum: (field: string) => ({ __agg: 'sum', field }),
+    count: () => ({ __agg: 'count' }),
+    getAggregateFromServer: async (q: { __col: string; cs: { t: string; [k: string]: unknown }[] }, spec: Record<string, { __agg: string; field?: string }>) => {
+      const { docs } = await (firestoreMockSelf as unknown as { getDocs: (q: unknown) => Promise<{ docs: { get: (f: string) => unknown }[] }> }).getDocs({ ...q, cs: q.cs.filter((c) => c.t === 'where') });
+      const data: Record<string, number> = {};
+      for (const [k, a] of Object.entries(spec)) data[k] = a.__agg === 'count' ? docs.length : docs.reduce((t, d) => t + Number(d.get(a.field as string) ?? 0), 0);
+      return { data: () => data };
+    },
     runTransaction: async (_db: unknown, fn: (tx: unknown) => Promise<unknown>) => fn({
       get: async (ref: { path: string }) => snap(ref.path),
       set: (ref: { path: string }, data: Data) => { store.set(ref.path, data); },
     }),
   };
+  firestoreMockSelf = mock;
+  return mock;
 }
 
 export const fakeFirebase = () => ({

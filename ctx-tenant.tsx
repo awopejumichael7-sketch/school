@@ -28,6 +28,7 @@ async function names(tenantId: string, col: string): Promise<NamedItem[]> {
     const snap = await getDocs(query(collection(firebase().db, `tenants/${tenantId}/${col}`), orderBy('order'), limit(200)));
     return snap.docs.map((d) => ({
       id: d.id, name: String(d.get('name') ?? ''), status: d.get('status') as string | undefined, order: d.get('order') as number | undefined,
+      startDate: d.get('startDate') as string | undefined, endDate: d.get('endDate') as string | undefined,
     }));
   } catch (e) {
     logTechnical(`load ${col}`, e);

@@ -519,21 +519,220 @@ service cloud.firestore {
         && validParentShape(request.resource.data);
     }
 
-    // ---------- counters (admission-number sequences) ----------
+    // ---------- counters (admission numbers; receipt numbers) ----------
+    function counterWriter(t, name) {
+      return hasRole(t, ['SCHOOL_ADMIN'])
+        || (name.matches('^receipts-[0-9]{4}$') && hasRole(t, ['ACCOUNTANT']));
+    }
     match /tenants/{t}/counters/{name} {
-      allow read: if hasRole(t, ['SCHOOL_ADMIN']);
-      allow create: if hasRole(t, ['SCHOOL_ADMIN'])
+      allow read: if counterWriter(t, name);
+      allow create: if counterWriter(t, name)
         && name.matches('^[a-z0-9-]{1,40}$')
         && request.resource.data.keys().hasOnly(['next'])
         && request.resource.data.next is int
         && request.resource.data.next >= 1 && request.resource.data.next <= 1000000;
       // Only ever moves forward, by a bounded amount (no resetting to reuse numbers).
-      allow update: if hasRole(t, ['SCHOOL_ADMIN'])
+      allow update: if counterWriter(t, name)
         && request.resource.data.keys().hasOnly(['next'])
         && request.resource.data.next is int
         && request.resource.data.next > resource.data.next
         && request.resource.data.next <= resource.data.next + 501;
       allow delete: if false;
+    }
+
+    // ---------- attendance: ONE document per class per day (cheap on the free quota) ----------
+    // Parents/students get a privacy-safe view in a later phase; this document lists a whole class.
+    function canRecordAttendance(t, classId) {
+      return hasRole(t, ['SCHOOL_ADMIN'])
+        || (hasRole(t, ['TEACHER']) && classId in get(memberPath(t, request.auth.uid)).data.get('classIds', []));
+    }
+    match /tenants/{t}/attendance/{id} {
+      allow read: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'STAFF'])
+                  || (hasRole(t, ['TEACHER'])
+                      && resource.data.classId in get(memberPath(t, request.auth.uid)).data.get('classIds', []));
+      allow create: if canRecordAttendance(t, request.resource.data.classId) && validAttendanceCreate(t, id);
+      allow update: if canRecordAttendance(t, resource.data.classId) && validAttendanceUpdate();
+      allow delete: if false;
+    }
+    function validAttendanceShape(d) {
+      return d.records is map && d.records.size() <= 300
+        && d.records.values().hasOnly(['P', 'A', 'L', 'E'])
+        && d.names is map && d.names.size() <= 300
+        && d.counts is map
+        && d.counts.keys().hasOnly(['P', 'A', 'L', 'E'])
+        && d.counts.keys().hasAll(['P', 'A', 'L', 'E'])
+        && d.counts.P is int && d.counts.A is int && d.counts.L is int && d.counts.E is int
+        && d.counts.P >= 0 && d.counts.A >= 0 && d.counts.L >= 0 && d.counts.E >= 0
+        && d.total is int
+        && d.total == d.records.size()
+        && d.counts.P + d.counts.A + d.counts.L + d.counts.E == d.total;
+    }
+    function validAttendanceCreate(t, id) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['tenantId', 'classId', 'date', 'month', 'session', 'records', 'names', 'counts',
+               'total', 'takenBy', 'takenByName', 'createdAt'])
+        && d.keys().hasAll(['tenantId', 'classId', 'date', 'month', 'session', 'records', 'names', 'counts',
+               'total', 'takenBy', 'takenByName', 'createdAt'])
+        && d.tenantId == t
+        && d.classId is string && d.classId.size() >= 1 && d.classId.size() <= 100
+        && isoDate(d.date)
+        && d.month == d.date.split('-')[0] + '-' + d.date.split('-')[1]
+        && id == d.classId + '_' + d.date
+        && d.session is string && d.session.size() <= 40
+        && d.takenBy == request.auth.uid
+        && d.takenByName is string && d.takenByName.size() <= 120
+        && d.createdAt == request.time
+        && validAttendanceShape(d);
+    }
+    function validAttendanceUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['records', 'names', 'counts', 'total', 'updatedAt', 'updatedBy'])
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time
+        && validAttendanceShape(request.resource.data);
+    }
+
+    // ---------- fees (money is integer minor units: kobo/cents) ----------
+    function feePath(t, f) { return /databases/$(database)/documents/tenants/$(t)/fees/$(f); }
+    function paymentPath(t, p) { return /databases/$(database)/documents/tenants/$(t)/payments/$(p); }
+    function validFeeCategory(c) { return c in ['TUITION', 'BOOKS', 'UNIFORM', 'TRANSPORT', 'EXAMINATION', 'OTHER']; }
+
+    match /tenants/{t}/feeItems/{id} {
+      allow read: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'ACCOUNTANT']);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN', 'ACCOUNTANT']) && validFeeItemCreate(t);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN', 'ACCOUNTANT']) && validFeeItemUpdate();
+      allow delete: if false;   // archive instead
+    }
+    function validFeeItemShape(d) {
+      return d.name is string && d.name.size() >= 1 && d.name.size() <= 100
+        && validFeeCategory(d.category)
+        && d.amount is int && d.amount > 0 && d.amount <= 100000000000
+        && d.classIds is list && d.classIds.size() >= 1 && d.classIds.size() <= 60
+        && d.termId is string && d.termId.size() <= 100
+        && d.session is string && d.session.size() >= 1 && d.session.size() <= 40
+        && d.status in ['ACTIVE', 'ARCHIVED'];
+    }
+    function validFeeItemCreate(t) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['tenantId', 'name', 'category', 'amount', 'classIds', 'termId', 'session', 'status',
+               'createdAt', 'createdBy'])
+        && d.keys().hasAll(['tenantId', 'name', 'category', 'amount', 'classIds', 'termId', 'session', 'status',
+               'createdAt', 'createdBy'])
+        && d.tenantId == t
+        && d.status == 'ACTIVE'
+        && d.createdAt == request.time
+        && d.createdBy == request.auth.uid
+        && validFeeItemShape(d);
+    }
+    function validFeeItemUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['name', 'category', 'amount', 'classIds', 'termId', 'status', 'updatedAt'])
+        && validFeeItemShape(request.resource.data);
+    }
+
+    match /tenants/{t}/fees/{id} {
+      allow read: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'ACCOUNTANT']);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN', 'ACCOUNTANT']) && validFeeCreate(t, id);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN', 'ACCOUNTANT']) && validFeeUpdate();
+      allow delete: if false;
+    }
+    // A new fee is always unpaid with balance == amount.
+    function validFeeCreate(t, id) {
+      let d = request.resource.data;
+      return id.matches('^[A-Za-z0-9_-]{1,160}$')
+        && d.keys().hasOnly(['tenantId', 'studentId', 'studentName', 'classId', 'itemId', 'description', 'category',
+               'amount', 'amountPaid', 'balance', 'status', 'session', 'termId', 'dueDate', 'createdAt', 'createdBy'])
+        && d.keys().hasAll(['tenantId', 'studentId', 'studentName', 'classId', 'itemId', 'description', 'category',
+               'amount', 'amountPaid', 'balance', 'status', 'session', 'termId', 'dueDate', 'createdAt', 'createdBy'])
+        && d.tenantId == t
+        && d.studentId is string && d.studentId.size() >= 1 && d.studentId.size() <= 60
+        && d.studentName is string && d.studentName.size() <= 120
+        && d.classId is string && d.classId.size() <= 100
+        && (d.itemId == null || d.itemId is string)
+        && d.description is string && d.description.size() >= 1 && d.description.size() <= 100
+        && validFeeCategory(d.category)
+        && d.amount is int && d.amount > 0 && d.amount <= 100000000000
+        && d.amountPaid == 0
+        && d.balance == d.amount
+        && d.status == 'UNPAID'
+        && d.session is string && d.session.size() <= 40
+        && d.termId is string && d.termId.size() <= 100
+        && d.dueDate is string && (d.dueDate == '' || isoDate(d.dueDate))
+        && d.createdAt == request.time
+        && d.createdBy == request.auth.uid;
+    }
+    // The ONLY changes allowed to an existing fee keep the books consistent:
+    // balance == amount - amountPaid, 0 <= amountPaid <= amount, status derived from them (or CANCELLED when unpaid).
+    function validFeeUpdate() {
+      let d = request.resource.data;
+      return d.diff(resource.data).affectedKeys().hasOnly(['amountPaid', 'balance', 'status', 'updatedAt'])
+        && d.amountPaid is int && d.amountPaid >= 0 && d.amountPaid <= d.amount
+        && d.balance == d.amount - d.amountPaid
+        && d.status in ['UNPAID', 'PARTIAL', 'PAID', 'CANCELLED']
+        && (d.status == 'CANCELLED'
+            ? d.amountPaid == 0
+            : d.status == (d.amountPaid == 0 ? 'UNPAID' : (d.balance == 0 ? 'PAID' : 'PARTIAL')));
+    }
+
+    // Payments are append-only. A mistake is corrected by a REVERSAL record, never by editing or deleting.
+    match /tenants/{t}/payments/{id} {
+      allow read: if hasRole(t, ['SCHOOL_ADMIN', 'PRINCIPAL', 'ACCOUNTANT']);
+      allow create: if hasRole(t, ['SCHOOL_ADMIN', 'ACCOUNTANT']) && validPaymentCreate(t, id);
+      allow update: if hasRole(t, ['SCHOOL_ADMIN', 'ACCOUNTANT']) && validPaymentReversedFlag(t, id);
+      allow delete: if false;
+    }
+    // The payment must move the fee's amountPaid by EXACTLY its amount, in the same batch (getAfter).
+    function validPaymentCreate(t, id) {
+      let d = request.resource.data;
+      let fb = get(feePath(t, d.feeId)).data;
+      let fa = getAfter(feePath(t, d.feeId)).data;
+      return d.keys().hasOnly(['tenantId', 'feeId', 'studentId', 'studentName', 'classId', 'description', 'amount',
+               'balanceAfter', 'kind', 'method', 'reference', 'note', 'paymentDate', 'receiptNumber', 'reverses',
+               'reversed', 'reversedBy', 'recordedBy', 'recordedByName', 'recordedAt'])
+        && d.keys().hasAll(['tenantId', 'feeId', 'studentId', 'studentName', 'classId', 'description', 'amount',
+               'balanceAfter', 'kind', 'method', 'reference', 'note', 'paymentDate', 'receiptNumber', 'reverses',
+               'reversed', 'reversedBy', 'recordedBy', 'recordedByName', 'recordedAt'])
+        && id.matches('^(RCPT|REV)-[0-9]{4}-[0-9]{6,}$')
+        && d.receiptNumber == id
+        && d.tenantId == t
+        && d.studentId == fb.studentId
+        && fb.status != 'CANCELLED'
+        && d.amount is int && d.amount > 0 && d.amount <= 100000000000
+        && d.balanceAfter is int && d.balanceAfter == fa.balance
+        && d.method in ['CASH', 'BANK_TRANSFER', 'POS', 'CHEQUE', 'OTHER']
+        && d.reference is string && d.reference.size() <= 100
+        && d.note is string && d.note.size() <= 200
+        && isoDate(d.paymentDate)
+        && d.studentName is string && d.studentName.size() <= 120
+        && d.classId is string && d.classId.size() <= 100
+        && d.description is string && d.description.size() <= 100
+        && d.reversed == false
+        && d.reversedBy == null
+        && d.recordedBy == request.auth.uid
+        && d.recordedByName is string && d.recordedByName.size() <= 120
+        && d.recordedAt == request.time
+        && ((d.kind == 'PAYMENT'
+              && d.reverses == null
+              && id.matches('^RCPT-.*')
+              && fa.amountPaid == fb.amountPaid + d.amount)
+            || (d.kind == 'REVERSAL'
+              && d.reverses is string
+              && id.matches('^REV-.*')
+              && fa.amountPaid == fb.amountPaid - d.amount
+              && get(paymentPath(t, d.reverses)).data.amount == d.amount
+              && get(paymentPath(t, d.reverses)).data.feeId == d.feeId
+              && get(paymentPath(t, d.reverses)).data.kind == 'PAYMENT'
+              && get(paymentPath(t, d.reverses)).data.reversed == false));
+    }
+    // The only change ever allowed to a payment: flag it reversed, pointing at the reversal written in the same batch.
+    function validPaymentReversedFlag(t, id) {
+      let d = request.resource.data;
+      return resource.data.kind == 'PAYMENT'
+        && resource.data.reversed == false
+        && d.diff(resource.data).affectedKeys().hasOnly(['reversed', 'reversedBy'])
+        && d.reversed == true
+        && d.reversedBy is string
+        && getAfter(paymentPath(t, d.reversedBy)).data.reverses == id;
     }
 
     // ---------- audit log: append-only, actor must be the caller ----------

@@ -79,7 +79,7 @@ describe('dashboard states', () => {
     stub = { ...base, member: member(), tenant: tenant() };
     show();
     await screen.findByRole('heading', { name: 'Overview' });
-    for (const l of ['Academics', 'Students', 'Teachers', 'Parents', 'Users', 'Import', 'Settings']) {
+    for (const l of ['Academics', 'Students', 'Teachers', 'Parents', 'Attendance', 'Fees', 'Users', 'Import', 'Settings']) {
       expect(screen.getAllByRole('link', { name: l }).length).toBeGreaterThan(0);
     }
     expect(screen.queryByRole('link', { name: 'My classes' })).not.toBeInTheDocument();
@@ -98,9 +98,9 @@ describe('dashboard states', () => {
     show('/app/users');
     expect(await screen.findByText(/don't have permission to view this page/i)).toBeInTheDocument();
     const names = screen.getAllByRole('link').map((a) => a.textContent);
-    expect(new Set(names)).toEqual(new Set(['Overview', 'My classes']));
+    expect(new Set(names)).toEqual(new Set(['Overview', 'Attendance', 'My classes']));
     cleanup();
-    for (const path of ['/app/settings', '/app/import', '/app/teachers', '/app/students', '/app/parents', '/app/academics']) {
+    for (const path of ['/app/settings', '/app/import', '/app/teachers', '/app/students', '/app/parents', '/app/academics', '/app/fees']) {
       show(path);
       expect(await screen.findByText(/don't have permission/i)).toBeInTheDocument();
       cleanup();
@@ -115,16 +115,28 @@ describe('dashboard states', () => {
       cleanup();
     }
   });
-  it('a principal can open Students and Teachers but not Users or Settings', async () => {
+  it('a principal can read students, teachers, attendance and fees but not manage users or settings', async () => {
     stub = { ...base, member: member({ role: 'PRINCIPAL' }), tenant: tenant() };
     show();
     await screen.findByRole('heading', { name: 'Overview' });
-    expect(new Set(screen.getAllByRole('link').map((a) => a.textContent))).toEqual(new Set(['Overview', 'Academics', 'Students', 'Teachers']));
+    expect(new Set(screen.getAllByRole('link').map((a) => a.textContent))).toEqual(new Set(['Overview', 'Academics', 'Students', 'Teachers', 'Attendance', 'Fees']));
   });
   it('accounts on a temporary password see only the change-password screen (no navigation)', async () => {
     stub = { ...base, member: member({ role: 'TEACHER', mustChangePassword: true }), tenant: tenant() };
     show();
     expect(await screen.findByRole('heading', { name: 'Choose a new password' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'My classes' })).not.toBeInTheDocument();
+  });
+
+  it('an accountant sees Students and Fees only; staff see Students, Teachers and Attendance', async () => {
+    stub = { ...base, member: member({ role: 'ACCOUNTANT' }), tenant: tenant() };
+    show('/app/attendance');
+    expect(await screen.findByText(/don't have permission/i)).toBeInTheDocument();   // accountants do not see attendance
+    expect(new Set(screen.getAllByRole('link').map((a) => a.textContent))).toEqual(new Set(['Overview', 'Students', 'Fees']));
+    cleanup();
+    stub = { ...base, member: member({ role: 'STAFF' }), tenant: tenant() };
+    show('/app/fees');
+    expect(await screen.findByText(/don't have permission/i)).toBeInTheDocument();    // staff do not see fees
+    expect(new Set(screen.getAllByRole('link').map((a) => a.textContent))).toEqual(new Set(['Overview', 'Students', 'Teachers', 'Attendance']));
   });
 });
